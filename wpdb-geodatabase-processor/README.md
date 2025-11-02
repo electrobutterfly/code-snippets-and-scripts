@@ -11,16 +11,8 @@ Make sure the following directory structure exists. Was it does: It reads the ge
 splits them into smaller json files and places them into the "tiles" directory.
 At least that is what it should do. 😄
 
-your-project-root/
-│
-├── preprocess/
-│   ├── preprocess.js
-│   ├── tile-generator.js
-│   └── config.js
-└── data/
-    ├── raw/ (your 25+GB GeoJSON files)
-    ├── processed/chunks (optimized regional chunks)
-    └── tiles/ (vector tiles for map display)
+your-project-root/ │ ├── preprocess/ │ ├── preprocess.js │ ├── tile-generator.js │ └── config.js └── data/ ├── raw/
+(your 25+GB GeoJSON files) ├── processed/chunks (optimized regional chunks) └── tiles/ (vector tiles for map display)
 
 
 Place your GeoJSON files in data/raw/ with the exact names:

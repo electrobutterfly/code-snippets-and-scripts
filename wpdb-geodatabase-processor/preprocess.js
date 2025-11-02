@@ -1,49 +1,27 @@
-# preprocess.js
-# @copyright     (c) 2025 Klaus Simon
-# @license       Custom Attribution-NonCommercial Sale License
-# @description   Part of the wpdb-geodatabase-processor Project
-# 
-# Permission is granted to use, modify, and distribute this script
-# for any purpose except commercial sale without explicit permission.
-# Attribution must be retained in all copies.
-# 
-# For commercial licensing: mini5propilot@gmail.com
-# Full license: LICENSE file in repository
-#####################################################################
-#####################################################################
-
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import readline from 'readline';
 
-// ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Configuration
+// Configuration - UPDATE THESE PATHS TO MATCH YOUR ACTUAL FILE LOCATIONS
 const config = {
-    // Input files
+    // Input files - UPDATE THESE PATHS!
     inputFiles: {
-        af: './data/raw/wdpa_af.geojson',
-        as: './data/raw/wdpa_as.geojson', 
-        eu: './data/raw/wdpa_eu.geojson',
-        na: './data/raw/wdpa_na.geojson',
-        wa: './data/raw/wdpa_wa.geojson'
+        af: './geodata/wdpa_af.geojson',
+        as: './geodata/wdpa_as.geojson', 
+        eu: './geodata/wdpa_eu.geojson',
+        na: './geodata/wdpa_na.geojson',
+        wa: './geodata/wdpa_wa.geojson'
     },
     
     // Output settings
     output: {
         chunks: './data/processed/chunks/',
-        tiles: './data/tiles/',
-        maxChunkSize: 50000, // 50KB per chunk
-        featuresPerChunk: 50 // Adjust based on feature complexity
-    },
-    
-    // Tile settings
-    tileSettings: {
-        minZoom: 0,
-        maxZoom: 14,
-        maxTileSize: 500000 // 500KB max per tile
+        maxChunkSize: 50000,
+        featuresPerChunk: 100 // Increased for better performance
     }
 };
 
@@ -53,10 +31,14 @@ class GeoJSONProcessor {
         this.featureCount = 0;
         this.currentChunk = [];
         this.chunkIndex = 0;
-        this.options = options;
     }
 
     processFeature(feature) {
+        // Skip invalid features
+        if (!feature || !feature.type || feature.type !== 'Feature') {
+            return;
+        }
+
         this.featureCount++;
         
         // Optimize the feature
@@ -77,9 +59,10 @@ class GeoJSONProcessor {
     }
 
     optimizeFeature(feature) {
+        // Create a clean, optimized feature
         return {
             type: 'Feature',
-            geometry: this.simplifyGeometry(feature.geometry),
+            geometry: feature.geometry ? this.simplifyGeometry(feature.geometry) : null,
             properties: this.optimizeProperties(feature.properties),
             id: feature.id || `${this.region}_${this.featureCount}`
         };
@@ -88,32 +71,51 @@ class GeoJSONProcessor {
     simplifyGeometry(geometry) {
         if (!geometry || !geometry.coordinates) return geometry;
         
-        const simplifyCoordinates = (coords) => {
-            return coords.map(coord => 
-                Array.isArray(coord[0]) ? simplifyCoordinates(coord) : 
-                [Math.round(coord[0] * 100000) / 100000, Math.round(coord[1] * 100000) / 100000]
-            );
+        // Only reduce precision, don't remove points for now
+        const processCoordinates = (coords) => {
+            if (Array.isArray(coords[0]) && Array.isArray(coords[0][0])) {
+                // Nested arrays (polygons, multi-polygons)
+                return coords.map(ring => processCoordinates(ring));
+            } else if (Array.isArray(coords[0])) {
+                // Array of coordinates (line string, polygon ring)
+                return coords.map(coord => [
+                    Math.round(coord[0] * 100000) / 100000, // ~1m precision
+                    Math.round(coord[1] * 100000) / 100000
+                ]);
+            } else {
+                // Single coordinate
+                return [
+                    Math.round(coords[0] * 100000) / 100000,
+                    Math.round(coords[1] * 100000) / 100000
+                ];
+            }
         };
 
         return {
             type: geometry.type,
-            coordinates: simplifyCoordinates(geometry.coordinates)
+            coordinates: processCoordinates(geometry.coordinates)
         };
     }
 
     optimizeProperties(properties) {
+        if (!properties) return {};
+        
         // Keep only essential properties
         const essential = {};
         
-        // WDPA core fields
-        if (properties.NAME) essential.name = properties.NAME;
-        if (properties.DESIG) essential.designation = properties.DESIG;
-        if (properties.DESIG_ENG) essential.designation_en = properties.DESIG_ENG;
-        if (properties.IUCN_CAT) essential.iucn_category = properties.IUCN_CAT;
-        if (properties.ISO3) essential.country = properties.ISO3;
-        if (properties.REP_AREA) essential.area = properties.REP_AREA;
-        if (properties.WDPAID) essential.wdpaid = properties.WDPAID;
-        if (properties.MARINE) essential.marine = properties.MARINE;
+        // WDPA core fields - adjust based on your actual field names
+        if (properties.NAME !== undefined) essential.name = properties.NAME;
+        if (properties.DESIG !== undefined) essential.designation = properties.DESIG;
+        if (properties.DESIG_ENG !== undefined) essential.designation_en = properties.DESIG_ENG;
+        if (properties.IUCN_CAT !== undefined) essential.iucn_category = properties.IUCN_CAT;
+        if (properties.ISO3 !== undefined) essential.country = properties.ISO3;
+        if (properties.REP_AREA !== undefined) essential.area = properties.REP_AREA;
+        if (properties.WDPAID !== undefined) essential.wdpaid = properties.WDPAID;
+        if (properties.MARINE !== undefined) essential.marine = properties.MARINE;
+        
+        // Try alternative field names
+        if (!essential.name && properties.name !== undefined) essential.name = properties.name;
+        if (!essential.designation && properties.designation !== undefined) essential.designation = properties.designation;
         
         return essential;
     }
@@ -147,15 +149,160 @@ class GeoJSONProcessor {
     }
 }
 
+// Process GeoJSON file that's a single FeatureCollection
+async function processFeatureCollectionFile(regionCode, filePath, processor) {
+    console.log(`Reading FeatureCollection from ${filePath}...`);
+    
+    try {
+        // For large files, we need to stream and parse carefully
+        const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+        let data = '';
+        let featuresFound = 0;
+
+        for await (const chunk of fileStream) {
+            data += chunk;
+            
+            // Try to find and extract features as we read
+            const featureMatch = data.match(/"features"\s*:\s*\[([\s\S]*?)\](?=,?\s*[}\]])/);
+            if (featureMatch) {
+                // We found the features array, now extract individual features
+                const featuresStr = featureMatch[1];
+                
+                // Simple approach: look for feature objects
+                let featureStart = -1;
+                let bracketCount = 0;
+                let inString = false;
+                let escapeNext = false;
+                
+                for (let i = 0; i < featuresStr.length; i++) {
+                    const char = featuresStr[i];
+                    
+                    if (escapeNext) {
+                        escapeNext = false;
+                        continue;
+                    }
+                    
+                    if (char === '\\') {
+                        escapeNext = true;
+                        continue;
+                    }
+                    
+                    if (char === '"') {
+                        inString = !inString;
+                        continue;
+                    }
+                    
+                    if (!inString) {
+                        if (char === '{' && bracketCount === 0) {
+                            featureStart = i;
+                            bracketCount = 1;
+                        } else if (char === '{') {
+                            bracketCount++;
+                        } else if (char === '}') {
+                            bracketCount--;
+                            if (bracketCount === 0 && featureStart !== -1) {
+                                // Found a complete feature
+                                const featureJson = featuresStr.substring(featureStart, i + 1);
+                                try {
+                                    const feature = JSON.parse(featureJson);
+                                    processor.processFeature(feature);
+                                    featuresFound++;
+                                    
+                                    if (featuresFound % 1000 === 0) {
+                                        console.log(`Processed ${featuresFound} features for ${regionCode}...`);
+                                    }
+                                } catch (e) {
+                                    console.log('Error parsing feature:', e.message);
+                                }
+                                featureStart = -1;
+                            }
+                        }
+                    }
+                }
+                
+                break; // We processed the features array, no need to continue
+            }
+            
+            // Prevent memory issues with very large files
+            if (data.length > 10000000) { // 10MB
+                console.log('File too large for this method, trying alternative approach...');
+                break;
+            }
+        }
+        
+        return featuresFound;
+        
+    } catch (error) {
+        console.error(`Error reading file ${filePath}:`, error);
+        return 0;
+    }
+}
+
+// Alternative method: Use line-by-line reading for newline-delimited JSON
+async function processLineDelimitedFile(regionCode, filePath, processor) {
+    console.log(`Trying line-delimited reading for ${filePath}...`);
+    
+    const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity
+    });
+
+    let featuresFound = 0;
+
+    for await (const line of rl) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) continue;
+        
+        // Skip FeatureCollection header/footer
+        if (trimmed.includes('"FeatureCollection"')) continue;
+        if (trimmed.includes('"features"')) continue;
+        if (trimmed === '[' || trimmed === ']' || trimmed === '{' || trimmed === '}') continue;
+        
+        // Remove trailing comma if present
+        let cleanLine = trimmed;
+        if (cleanLine.endsWith(',')) {
+            cleanLine = cleanLine.slice(0, -1);
+        }
+        
+        // Try to parse as feature
+        if (cleanLine.startsWith('{') && cleanLine.endsWith('}')) {
+            try {
+                const feature = JSON.parse(cleanLine);
+                if (feature.type === 'Feature') {
+                    processor.processFeature(feature);
+                    featuresFound++;
+                    
+                    if (featuresFound % 1000 === 0) {
+                        console.log(`Processed ${featuresFound} features for ${regionCode}...`);
+                    }
+                }
+            } catch (e) {
+                // Not a valid feature JSON, skip
+            }
+        }
+    }
+    
+    return featuresFound;
+}
+
 // Process a single region
 async function processRegion(regionCode) {
-    console.log(`Processing ${regionCode}...`);
+    console.log(`\n=== Processing ${regionCode} ===`);
     
     const inputFile = config.inputFiles[regionCode];
+    console.log(`Input file: ${inputFile}`);
+    
     if (!fs.existsSync(inputFile)) {
-        console.log(`File not found: ${inputFile}`);
+        console.log(`❌ File not found: ${inputFile}`);
+        console.log(`Current working directory: ${process.cwd()}`);
+        console.log(`Please check the file path in config`);
         return;
     }
+
+    // Check file size
+    const stats = fs.statSync(inputFile);
+    console.log(`File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
     // Create output directory
     if (!fs.existsSync(config.output.chunks)) {
@@ -163,79 +310,75 @@ async function processRegion(regionCode) {
     }
 
     const processor = new GeoJSONProcessor(regionCode);
-    server-preprocess
+    let featuresFound = 0;
+
     try {
-        // Read and process the file in chunks to avoid memory issues
-        const stream = fs.createReadStream(inputFile, { 
-            encoding: 'utf8',
-            highWaterMark: 64 * 1024 // 64KB chunks
-        });
-        
-        let buffer = '';
-        let featureCount = 0;
+        // First, try to read the file as a complete GeoJSON to understand its structure
+        const sampleData = fs.readFileSync(inputFile, 'utf8', 0, 5000);
+        console.log(`File sample (first 200 chars): ${sampleData.substring(0, 200)}...`);
 
-        for await (const chunk of stream) {
-            buffer += chunk;
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || ''; // Keep incomplete line
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed.startsWith('{"type":"Feature"')) {
-                    try {
-                        // Remove trailing comma if present
-                        const cleanLine = trimmed.replace(/,$/, '');
-                        const feature = JSON.parse(cleanLine);
-                        processor.processFeature(feature);
-                        featureCount++;
-                        
-                        // Progress indicator
-                        if (featureCount % 1000 === 0) {
-                            console.log(`Processed ${featureCount} features for ${regionCode}...`);
-                        }
-                    } catch (e) {
-                        console.log('Error parsing feature:', e.message, 'Line:', trimmed.substring(0, 100));
-                    }
-                }
-            }
-        }
-
-        // Process any remaining buffer
-        if (buffer.trim()) {
-            try {
-                const feature = JSON.parse(buffer.trim().replace(/,$/, ''));
-                processor.processFeature(feature);
-                featureCount++;
-            } catch (e) {
-                console.log('Error parsing final feature:', e.message);
-            }
+        if (sampleData.includes('"FeatureCollection"')) {
+            console.log('Detected FeatureCollection format');
+            featuresFound = await processFeatureCollectionFile(regionCode, inputFile, processor);
+        } else if (sampleData.includes('"type":"Feature"')) {
+            console.log('Detected line-delimited features format');
+            featuresFound = await processLineDelimitedFile(regionCode, inputFile, processor);
+        } else {
+            console.log('Unknown format, trying line-delimited approach...');
+            featuresFound = await processLineDelimitedFile(regionCode, inputFile, processor);
         }
 
         processor.finish();
-        console.log(`Finished processing ${regionCode}. Total features: ${featureCount}`);
+        console.log(`✅ Finished processing ${regionCode}. Total features: ${featuresFound}`);
         
     } catch (error) {
-        console.error(`Error processing ${regionCode}:`, error);
+        console.error(`❌ Error processing ${regionCode}:`, error);
     }
 }
 
 // Process all regions
 async function processAllRegions() {
-    const regions = Object.keys(config.inputFiles);
-    
     console.log('Starting GeoJSON preprocessing...');
-    console.log('Regions to process:', regions);
+    console.log('Regions to process:', Object.keys(config.inputFiles));
+    console.log('Current directory:', process.cwd());
     
-    for (const region of regions) {
+    for (const region of Object.keys(config.inputFiles)) {
         await processRegion(region);
     }
     
-    console.log('All regions processed!');
+    console.log('\n=== All regions processed! ===');
+}
+
+// Simple test function to check file structure
+async function testFileStructure() {
+    console.log('\n=== Testing file structure ===');
+    
+    for (const [region, filePath] of Object.entries(config.inputFiles)) {
+        if (fs.existsSync(filePath)) {
+            console.log(`\n${region}: ${filePath}`);
+            try {
+                const sample = fs.readFileSync(filePath, 'utf8', 0, 500);
+                console.log(`First 500 chars: ${sample}`);
+                console.log(`Contains "FeatureCollection": ${sample.includes('FeatureCollection')}`);
+                console.log(`Contains "features": ${sample.includes('features')}`);
+                console.log(`Contains "Feature": ${sample.includes('"type":"Feature"')}`);
+            } catch (e) {
+                console.log(`Error reading: ${e.message}`);
+            }
+        } else {
+            console.log(`\n${region}: FILE NOT FOUND at ${filePath}`);
+        }
+    }
 }
 
 // Run if called directly
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    processAllRegions().catch(console.error);
+    // Check if we should test first
+    if (process.argv.includes('--test')) {
+        testFileStructure();
+    } else {
+        processAllRegions().catch(console.error);
+    }
 }
 
-export { processAllRegions, processRegion, GeoJSONProcessor };
+export { processAllRegions, processRegion, testFileStructure };
