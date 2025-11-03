@@ -94,7 +94,7 @@ Run like this if you are running out of memory (can be adjusted, use 16384 for 1
 
 ```bash
 bash
-cd "your-project-root"
+free -h  # Check available memory
 node --max-old-space-size=8192 preprocessor.js
 ```
 
