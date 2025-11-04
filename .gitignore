@@ -1,3 +1,4 @@
 my/*
 wpdb-geodatabase-processor/server.js
 wpdb-geodatabase-processor/preprocess/*
+wpdb-geodatabase-processor*/*

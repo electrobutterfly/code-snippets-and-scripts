@@ -3,7 +3,7 @@
 ## Description
 
 Written for node.js.
-The goal is to process and split the **huge geodatabase files** which can be as big as 10GB each,
+The goal is to process and split the **huge geodatabase files in "geojson format"** which can be as big as 10GB each,
 or even bigger, into smaller json chunks which can be handled better by smaller servers (<= 8GB)
 without crashing them, for easy injection as layers into maps. The project is set to use ES modules.
 
@@ -25,14 +25,16 @@ Coordinates (avg, max)
 
 Make sure the following directory structure exists.
 
+```
 **your-project-root**/
 └── preprocess/ 
-          │       ├── preprocessor.js
-          │       ├── file-inspector.js
-          │       └── config.js
-          └─ data/
-                   ├── raw/ (your 25+GB GeoJSON files)
-                   └── processed/chunks (optimized regional chunks)
+         ├── preprocessor.js
+         ├── file-inspector.js
+         └── config.js
+     └─ data/
+          ├── raw/ (your 25+GB GeoJSON files)
+          └── processed/chunks (optimized regional chunks)
+```
 
 
 Place your GeoJSON files in data/raw/ with the exact names:
@@ -42,8 +44,9 @@ wdpa_as.geojson
 wdpa_eu.geojson
 wdpa_na.geojson
 wdpa_wa.geojson
+wdpa_sa.geojson
 
-Actual location of your "geojson" files can be configured in config.js as needed.
+If the actual location of your "geojson" files varies, you can configure the location in config.js as needed.
 
 ## Install dependencies
 
@@ -109,6 +112,12 @@ node --max-old-space-size=8192 preprocessor.js --region wa
 
 
 
+## Issues and bugs
+
+Please report any issues and bugs found at the [Issue Tracker](https://github.com/electrobutterfly/code-snippets-and-scripts/issues)
+
+
+
 ## Authors and acknowledgment
 
 © 2025 Klaus Simon.
@@ -126,7 +135,7 @@ This project is licensed under the Custom Attribution-NonCommercial Sale License
 
 **For commercial sale licensing,** please contact: mini5propilot@gmail.com
 
-*See the [LICENSE](LICENSE) file for full terms.*
+*See the [LICENSE](./LICENSE) file for full terms.*
 
 
 

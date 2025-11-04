@@ -4,7 +4,7 @@
 
 **
 
-[wpdb-geodatabase-processor]: https://github.com/electrobutterfly/code-snippets-and-scripts/tree/main/wpdb-geodatabase-processor
+[Process WPDB Geodatabase Files](./wpdb-geodatabase-processor)
 
 The goal is to process and split the **huge geodatabase files** which can be as big as 10GB each,
 or even bigger, into smaller json chunks which can be handled better by smaller servers (<= 8GB)
