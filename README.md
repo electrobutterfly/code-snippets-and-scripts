@@ -8,7 +8,7 @@ The goal is to process and split the **huge geodatabase files in "geojson format
 
 
 
-## [📁 Simple CORS Proxy](./cors-proxy)
+## [📁 Simple CORS Proxy](./cors-proxy-simple)
 
 This script sets up a **CORS Anywhere proxy server** that acts as an intermediary to bypass Cross-Origin Resource Sharing (CORS) restrictions in web browsers. CORS is a security mechanism that prevents web pages from making requests to domains different from their own, which can be problematic during development or when accessing APIs from client-side JavaScript.
 
