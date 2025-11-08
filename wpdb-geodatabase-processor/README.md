@@ -2,12 +2,11 @@
 
 ## Description
 
-Written for node.js.
-The goal is to process and split the **huge geodatabase files in "geojson format"** which can be as big as 10GB each, or even much bigger, by computers with low memory (<= 8GB), without crashing the script running out of memory. It splits hem into smaller json chunks which then can be handled better for easy injection as layers into maps by web applications.
+**Written for node.js.**
+The goal is to process and split the **huge geodatabase files in "geojson format"** which can be as big as 10GB each, or even much bigger, without crashing the script running out of memory. It splits hem into smaller json chunks which then can be handled better for easy injection as layers into maps by web applications.
 
 <u>**Was it does:**</u>
-**preprocessor.js** reads the huge geodatabase geojson file, splits them into smaller json files and places small, 
-optimized in regional .json chunks into the "./data/chunks" directory.
+**preprocessor.js** reads the huge geodatabase geojson file, splits them into smaller json files and places small, optimized in regional .json chunks into the "./data/chunks" directory.
 At least that is what it should do. 😄
 
 **file-inspector.js** analyzes the format of the geodatabase files and outputs any
@@ -56,10 +55,10 @@ The actual path to your "geojson" files can configured in config.js .
 ## Install dependencies
 
 **node.js**
-Note that we are using ES modules (import/export) so we need to have a Node.js version that supports them and top-level await support.(version 14.8.0+ recommended).
+Note that we are using "ES modules" (import/export) so we need to have a Node.js version that supports them and "top-level await" support.(version 14.8.0+ recommended).
 
 ```bash
-node --version    # Should show v18.x.x or higher
+node --version    # Should show v14.8.x or higher
 ```
 
 ```bash
@@ -78,12 +77,12 @@ nvm install 18
 nvm use 18
 ```
 
-
+****
 
 ## Usage file-inspector.js
 
 You should run this first. The script will take a while to execute. You can configure html or console output but html output
-will be much more extensive. This will give you a rough idea what to expect in the geojson files. Go and grab a coffee, it will take a while.
+will be much more extensive. This will give you a rough idea what to expect in the geojson files. Go and grab a coffee, **it will take a while**.
 When finished, the script launches a webserver which can be accessed through your browser at [http://localhost:8081](http://localhost:8081).
 Press Ctrl+C to stop the server.
 
@@ -97,7 +96,7 @@ node file-inspector.js
 ## Run preprocessing
 
 🚀 **Execution Steps**
-IF you love to fill your console up with thousands of lines, go for it. Otherwise make sure you select html output. You will get a nice formatted html page which you can access through your browser. Run the preprocessor from your project root (Go and grab another coffee or have some lunch, this will take a while for 15+GB)
+IF you love to fill your console up with thousands of lines, go for it. Otherwise make sure you select html output. You will get a nice formatted html page which you can access through your browser. Run the preprocessor from your project root (Go and grab another coffee or have some lunch, this will **take a while** for 15+GB)
 
 ```bash
 node preprocessor.js
