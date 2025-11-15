@@ -226,3 +226,7 @@ This project is licensed under the [MIT License](https://opensource.org/license/
 ------
 
 **The bottom line**: When repository histories diverge due to corruption or necessary rewriting, traditional Git merges fail. This script provides the only practical way to maintain synchronization without manual conflict resolution hell.
+
+------
+
+<img src="https://electrobutterfly.com/images/logo-small-github.png" alt="Logo" style="float:left; margin-right:10px; width:150px;">
