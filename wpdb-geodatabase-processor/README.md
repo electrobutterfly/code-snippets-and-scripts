@@ -170,3 +170,7 @@ This project is licensed under the Custom Attribution-NonCommercial Sale License
 
 Software, Code snippets or scripts might be added from time to time as my work progress goes on
 and I decide to make the code public.
+
+------
+
+<img src="https://electrobutterfly.com/images/logo-small-github.png" alt="Logo" style="float:left; margin-right:10px; width:150px;">
