@@ -9,7 +9,6 @@
 ## Full license text: https://opensource.org/licenses/MIT
 #########################################################
 
-
 # Automated Github repository synchronization with configurable targets
 
 ###############################################################################
@@ -20,14 +19,9 @@
 # Format: "local_folder|source_repo|source_branch|destination_repo|destination_branch"
 
 REPOSITORIES=(
-    # Example 1
     "my-project|https://github.com/original/project.git|main|https://github.com/yourusername/project-fork.git|main"
-    
-    # Example 2
     "project-legacy|https://github.com/original/project.git|legacy|https://github.com/yourusername/project-legacy.git|develop"
-    
-    # Add more repositories below as needed:
-    # "local-folder|source-repo|source-branch|dest-repo|dest-branch"
+
 )
 
 ###############################################################################
@@ -85,50 +79,46 @@ print_info() {
     echo -e "${BLUE}ℹ️  $1${NC}"
 }
 
-# Extract owner/repo from URLs
-extract_repo_info() {
-    local url="$1"
-    if [[ "$url" =~ https://github.com/([^/]+)/([^/.]+) ]]; then
-        echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    elif [[ "$url" =~ git@github.com:([^/]+)/([^/.]+) ]]; then
-        echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    else
-        print_error "Invalid GitHub URL: $url"
-        return 1
-    fi
+# Use jq for reliable JSON parsing
+compare_commits_jq() {
+    local source_repo="$1"
+    local source_branch="$2"
+    local dest_repo="$3" 
+    local dest_branch="$4"
+    
+    # Get commits from source using jq (only first line of commit message)
+    local source_commits=$(curl -s "https://api.github.com/repos/$source_repo/commits?sha=$source_branch&per_page=10" | \
+        jq -r '.[].commit.message | split("\n")[0]' 2>/dev/null)
+    
+    # Get commits from destination using jq (only first line of commit message)
+    local dest_commits=$(curl -s "https://api.github.com/repos/$dest_repo/commits?sha=$dest_branch&per_page=10" | \
+        jq -r '.[].commit.message | split("\n")[0]' 2>/dev/null)
+    
+    # Find commits in source that are not in destination
+    local unique_commits=()
+    
+    while IFS= read -r source_commit; do
+        if [ -n "$source_commit" ]; then
+            local found=0
+            while IFS= read -r dest_commit; do
+                if [ "$source_commit" = "$dest_commit" ]; then
+                    found=1
+                    break
+                fi
+            done <<< "$dest_commits"
+            
+            if [ $found -eq 0 ]; then
+                unique_commits+=("$source_commit")
+            else
+                # Stop when we find the first matching commit (sync point)
+                break
+            fi
+        fi
+    done <<< "$source_commits"
+    
+    printf '%s\n' "${unique_commits[@]}"
 }
 
-# Function to get commits via API for a given count
-get_commits_for_count() {
-    local repo_info="$1"
-    local branch="$2"
-    local count=$3
-    
-    local temp1=$(mktemp)
-    
-    # Get commits using GitHub API
-    curl -s -H "Accept: application/vnd.github.v3+json" \
-      "https://api.github.com/repos/$repo_info/commits?sha=$branch&per_page=$count" > "$temp1"
-    
-    # Extract commit messages and hashes
-    if command -v jq >/dev/null 2>&1; then
-        jq -r '.[] | "\(.sha)|\(.commit.message | split("\n")[0])"' "$temp1" > "$temp1.commits"
-    else
-        grep -E '"sha"|"message"' "$temp1" | \
-        sed 's/"sha":/"hash"/g' | \
-        sed 's/"message":"//g' | \
-        sed 's/",//g' | \
-        sed 's/^ *//g' | \
-        paste -d "|" - - | \
-        sed 's/"hash": "\([^"]*\)"/\1/g' | \
-        head -n "$count" > "$temp1.commits"
-    fi
-    
-    cat "$temp1.commits"
-    rm -f "$temp1" "$temp1.commits"
-}
-
-# Process a single repository
 process_repository() {
     local local_folder="$1"
     local source_repo="$2"
@@ -136,72 +126,31 @@ process_repository() {
     local dest_repo="$4"
     local dest_branch="$5"
     
-    # Store current directory
     local current_dir=$(pwd)
     
-    # Check if local folder exists
     if [ ! -d "$local_folder" ]; then
         print_error "Local repository directory '$local_folder' does not exist"
         return 1
     fi
     
-    # Change to target repo
     cd "$local_folder"
     
-    print_info "Working in: $(pwd)"
+    echo ""
+    print_info "=== Processing: $local_folder ==="
     
-    # Extract repo info for API calls
-    local source_repo_info=$(extract_repo_info "$source_repo") || return 1
-    local dest_repo_info=$(extract_repo_info "$dest_repo") || return 1
+    # Extract repo names for API
+    local source_repo_name=$(echo "$source_repo" | sed 's|https://github.com/||' | sed 's|.git$||')
+    local dest_repo_name=$(echo "$dest_repo" | sed 's|https://github.com/||' | sed 's|.git$||')
     
-    print_info "Comparing: $source_repo_info ($source_branch) → $dest_repo_info ($dest_branch)"
+    print_info "Source: $source_repo_name ($source_branch)"
+    print_info "Destination: $dest_repo_name ($dest_branch)"
     
-    # Auto-adjust search depth based on differences found
-    print_info "Auto-adjusting search depth..."
-    local count=25
+    # Get unique commits using jq
+    print_info "Finding unique commits..."
     local unique_commits=()
-    local max_count=400  # Safety limit
-    
-    while [ $count -le $max_count ]; do
-        # Get commits from source repo
-        local source_commits=$(get_commits_for_count "$source_repo_info" "$source_branch" "$count")
-        
-        # Get commits from destination repo (only messages for comparison)
-        local dest_commits_temp=$(mktemp)
-        get_commits_for_count "$dest_repo_info" "$dest_branch" "$count" | cut -d'|' -f2 > "$dest_commits_temp"
-        
-        # Find unique commits
-        local current_unique=()
-        while IFS='|' read -r hash message; do
-            if [ -n "$message" ] && ! grep -q -F "$message" "$dest_commits_temp"; then
-                current_unique+=("$hash|$message")
-            fi
-        done <<< "$source_commits"
-        
-        rm -f "$dest_commits_temp"
-        
-        local current_count=${#current_unique[@]}
-        
-        if [ $current_count -eq 0 ]; then
-            print_success "No unique commits found in last $count commits"
-            break
-        elif [ $current_count -lt $count ]; then
-            print_success "Stable count reached: $current_count unique commits in last $count commits"
-            unique_commits=("${current_unique[@]}")
-            break
-        else
-            print_warning "Found $current_count differences in last $count commits, increasing search depth..."
-            local old_count=$count
-            count=$((count * 2))
-            
-            if [ $count -gt $max_count ]; then
-                count=$max_count
-                print_warning "Reached maximum search depth of $max_count commits"
-                unique_commits=("${current_unique[@]}")
-                break
-            fi
-        fi
-    done
+    while IFS= read -r line; do
+        [ -n "$line" ] && unique_commits+=("$line")
+    done < <(compare_commits_jq "$source_repo_name" "$source_branch" "$dest_repo_name" "$dest_branch")
     
     local unique_count=${#unique_commits[@]}
     
@@ -211,12 +160,11 @@ process_repository() {
         return 0
     fi
     
-    # Display found commits
+    # Show what we found
     echo ""
-    print_info "Found $unique_count commits to cherry-pick:"
+    print_info "Found $unique_count new commits:"
     for commit in "${unique_commits[@]}"; do
-        IFS='|' read -r hash message <<< "$commit"
-        echo -e "  ${GREEN}•${NC} ${hash:0:8}: $message"
+        echo -e "  ${GREEN}•${NC} $commit"
     done
     
     # Ask for confirmation
@@ -224,7 +172,7 @@ process_repository() {
     read -p "$(echo -e ${YELLOW}"Proceed with cherry-picking? (y/N): "${NC})" -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_warning "Operation cancelled for $local_folder"
+        print_warning "Operation cancelled"
         cd "$current_dir"
         return 0
     fi
@@ -232,52 +180,51 @@ process_repository() {
     # Execute git operations
     print_info "Executing git operations..."
     
-    # Fetch from upstream
+    # Fetch from upstream with exact number needed + 1 for grafted
     local fetch_depth=$((unique_count + 1))
     print_info "Fetching from upstream (depth=$fetch_depth)..."
-    git fetch upstream --depth=$fetch_depth
+    git fetch upstream $source_branch --depth=$fetch_depth
     
     # Create temporary branch
     print_info "Creating temporary branch..."
     git branch -D temp-upstream 2>/dev/null || true
-    git checkout -b temp-upstream upstream/master
+    git checkout -b temp-upstream upstream/$source_branch
     
-    # Show recent commits
-    print_info "Recent commits in temp-upstream:"
+    # Show what we'll cherry-pick
+    print_info "Commits in temp-upstream:"
     git log --oneline -$fetch_depth
     
-    # Switch back to master
-    print_info "Switching back to master..."
-    git checkout master
+    # Switch back to destination branch
+    print_info "Switching back to $dest_branch branch..."
+    git checkout $dest_branch
     
-    # Cherry-pick in reverse order (oldest first)
-    print_info "Cherry-picking $unique_count commits (oldest first)..."
+    # Get commit hashes in correct order - Take the NEWEST commits
+    local commit_hashes=($(git log temp-upstream --oneline -$fetch_depth | head -n $unique_count | cut -d' ' -f1))
     
-    local commit_hashes=()
-    for ((i=unique_count-1; i>=0; i--)); do
-        IFS='|' read -r hash message <<< "${unique_commits[$i]}"
-        commit_hashes+=("$hash")
-    done
-    
-    for hash in "${commit_hashes[@]}"; do
-        print_info "Cherry-picking: ${hash:0:8}"
+    print_info "Cherry-picking $unique_count commits..."
+    for ((i=${#commit_hashes[@]}-1; i>=0; i--)); do
+        local hash="${commit_hashes[$i]}"
+        local commit_msg=$(git log -1 --format="%s" "$hash")
+        print_info "Cherry-picking: ${hash:0:8} - $commit_msg"
         if ! git cherry-pick "$hash"; then
-            print_error "Cherry-pick failed for ${hash:0:8}"
-            print_warning "Manual resolution required. temp-upstream branch preserved."
+            print_error "Cherry-pick failed!"
+            print_warning "Resolve conflicts and run: git cherry-pick --continue"
+            print_warning "Or abort with: git cherry-pick --abort"
             cd "$current_dir"
             return 1
         fi
     done
     
-    # Push to origin
+    # Push changes
     print_info "Pushing to origin..."
     git push --force origin
     
-    print_success "Successfully processed $local_folder - $unique_count commits cherry-picked"
+    # Clean up
+    git branch -D temp-upstream
     
-    # Return to original directory
+    print_success "Successfully synchronized $local_folder"
+    
     cd "$current_dir"
-    echo ""
 }
 
 ###############################################################################
