@@ -28,6 +28,10 @@ A specialized Bash script designed to synchronize GitHub repositories when tradi
 
 
 
+## [📁 Secure Public Key Server/Client Authentication System](./secure-server-client)
+
+This software written in php is a secure challenge-response authentication system that uses RSA key pairs and encrypted time-bound challenges. It enables passwordless, cryptographically verified communication between clients and servers for API protection and automated scripts. The system prevents replay attacks with 5-minute expirations and brute force with failure-based rate limiting. It's designed for secure server-to-server communication where traditional credentials are impractical.
+
 
 
 ## Authors and acknowledgment
