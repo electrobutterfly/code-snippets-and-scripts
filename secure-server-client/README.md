@@ -17,13 +17,13 @@ A robust challenge-response authentication system using RSA key pairs and encryp
 ├── server.php           # Server authentication endpoint
 └── keys/
     ├── .htaccess        # Secure access to the directory
-    └── auth.pub         # Public key
+    └── dummy.pub         # Public key
     
     
 /client-directory/
 ├── client.php           # Client authentication script
 └── keys/
-    ├── auth.key         # Private key (keep secure!)
+    ├── dummy.key         # Private key (keep secure!)
     └── .htaccess        # Secure access to the directory
 ```
 
@@ -37,14 +37,14 @@ mkdir -p keys
 cd keys
 
 # Generate private key (no password for automation)
-openssl genrsa -out auth 2048
+openssl genrsa -out dummy.key 2048
 
 # Generate public key from private key
-openssl rsa -in auth.key -pubout -out auth.pub
+openssl rsa -in dummy.key -pubout -out dummy.pub
 
 # Set secure permissions
-chmod 600 auth.key  # Private: owner read-only
-chmod 644 auth.pub  # Public: world-readable
+chmod 600 dummy.key  # Private: owner read-only
+chmod 644 dummy.pub  # Public: world-readable
 ```
 
 
@@ -52,7 +52,7 @@ chmod 644 auth.pub  # Public: world-readable
 ### 3. Server Configuration (`server.php`)
 
 ```php
-$publicKeyPath = './keys/auth.pub';
+$publicKeyPath = './keys/dummy.pub';
 $sharedSecret = 'your_64_character_secure_random_secret';
 $debugMode = true;  // Set to false in production
 ```
@@ -62,7 +62,7 @@ $debugMode = true;  // Set to false in production
 ### 4. Client Configuration (`client.php`)
 
 ```php
-$privateKeyPath = './keys/auth.key';
+$privateKeyPath = './keys/dummy.key';
 $serverUrl = 'https://yourserver.com/server.php';
 $sharedSecret = 'your_64_character_secure_random_secret'; // Same as server
 $debugMode = true;
@@ -90,7 +90,7 @@ $debugMode = true;
 ```php
 // Simple client usage
 $client = new ClientAuthenticator(
-    './keys/auth.key',
+    './keys/dummy.key',
     'https://api.example.com/server.php',
     'your_shared_secret'
 );
@@ -163,6 +163,7 @@ $maxConsecutiveFailures = 5;     // Auth failures before block
 $failureWindow = 900;            // 15-minute failure window  
 $blockDuration = 1800;           // 30-minute block duration
 $challengeTimeout = 300;         // 5-minute challenge expiry
+$maxStorageSize = 100 * 1024 * 1024; // 100MB maximum storage for rate limits
 ```
 
 
@@ -171,16 +172,16 @@ $challengeTimeout = 300;         // 5-minute challenge expiry
 
 ```bash
 # Critical: Set proper permissions
-chmod 600 keys/auth.key      # Private key: owner read-only
-chmod 644 keys/auth.pub      # Public key: world-readable  
+chmod 600 keys/dummy.key      # Private key: owner read-only
+chmod 644 keys/dummy.pub      # Public key: world-readable  
 chmod 755 server.php         # Server script: executable
 chmod 755 client.php         # Client script: executable
 
 # Verify permissions
 ls -la keys/
 # Should show:
-# -rw------- auth.key  (private key)
-# -rw-r--r-- auth.pub  (public key)
+# -rw------- dummy.key  (private key)
+# -rw-r--r-- dummy.pub  (public key)
 ```
 
 
@@ -193,8 +194,8 @@ ls -la keys/
 
 ```bash
 # Fix: Set correct ownership
-chown www-data:www-data keys/auth.pub  # Ubuntu web server
-chown apache:apache keys/auth.pub      # CentOS web server
+chown www-data:www-data keys/dummy.pub  # Ubuntu web server
+chown apache:apache keys/dummy.pub      # CentOS web server
 ```
 
 
@@ -203,8 +204,8 @@ chown apache:apache keys/auth.pub      # CentOS web server
 
 ```bash
 # Verify key pair matches
-openssl rsa -in auth -pubout -out generated.pub
-diff generated.pub auth.pub  # Should show no differences
+openssl rsa -in dummy.key -pubout -out generated.pub
+diff generated.pub dummy.pub  # Should show no differences
 ```
 
 
@@ -293,13 +294,23 @@ $debugMode = true;
 
 - ✅ **Without the Shared Secret, Challenges Are Useless**
 
-  An attacker can request challenges all day, but they cannot:
+- ✅ **An attacker can request challenges all day, but they cannot:**
 
   - Decrypt the challenge (needs shared secret)
+
   - Sign the decrypted challenge (needs private key)
+  
   - Use old challenges (5-minute expiration)
-
-
+  
+  - Send requests from many different IP addresses
+  
+  - Send requests with random identifiers
+  
+  - Quickly fill the filesystem with rate limit files
+  
+  - Cause disk space exhaustion or filesystem performance degradation
+  
+    
 
 ## Support
 

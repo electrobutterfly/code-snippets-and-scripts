@@ -19,7 +19,7 @@
 // ==========================================
 
 $publicKeyPath = './keys/dummy.pub';
-$sharedSecret = '1820010959935ß5&dajadouu8..asusts$gg';
+$sharedSecret = $_ENV['AUTH_SHARED_SECRET'] ?? '1820010959935ß5&dajadouu8..asusts$gg';
 
 // Challenge request protection
 $maxChallengesPerMinute = 60;   // Maximum challenge requests per minute per IP
@@ -30,6 +30,9 @@ $debugMode = true;
 $maxConsecutiveFailures = 5;    // Block after 5 consecutive failures
 $failureWindow = 900;           // 15 minute window for counting failures
 $blockDuration = 1800;          // 30 minute block after too many failures
+
+// Storage limits
+$maxStorageSize = 100 * 1024 * 1024; // 100MB maximum storage for rate limits
 
 // ==========================================
 // SECURITY HARDENED - DON'T MODIFY BELOW
@@ -71,7 +74,7 @@ class SecurityValidator {
             throw new Exception("Invalid signature format");
         }
         
-        if (!preg_match('/^[a-zA-Z0-9\/+]+={0,2}$/', $signature)) {
+        if (!preg_match('/^[a-zA-Z0-9+\/]+={0,2}$/', $signature) || (strlen($signature) % 4 !== 0)) {
             throw new Exception("Invalid signature encoding");
         }
         
@@ -87,38 +90,152 @@ class SecurityValidator {
     }
 }
 
+class SecureStorageManager {
+    private $storagePath;
+    private $maxStorageSize;
+    private $maxFiles = 10000; // Maximum number of files to prevent inode exhaustion
+    
+    public function __construct($storagePath, $maxStorageSize) {
+        $this->storagePath = $storagePath;
+        $this->maxStorageSize = $maxStorageSize;
+        
+        // Create secure storage directory if it doesn't exist
+        if (!is_dir($this->storagePath)) {
+            mkdir($this->storagePath, 0700, true);
+        }
+    }
+    
+    public function enforceStorageLimits() {
+        if (!is_dir($this->storagePath)) {
+            return;
+        }
+        
+        $files = [];
+        $totalSize = 0;
+        
+        // Scan directory and collect file information
+        foreach (new DirectoryIterator($this->storagePath) as $fileInfo) {
+            if ($fileInfo->isDot() || $fileInfo->isDir()) {
+                continue;
+            }
+            
+            $filename = $fileInfo->getPathname();
+            $files[] = [
+                'filename' => $filename,
+                'size' => $fileInfo->getSize(),
+                'mtime' => $fileInfo->getMTime()
+            ];
+            $totalSize += $fileInfo->getSize();
+        }
+        
+        // Check if we need to clean up
+        if ($totalSize > $this->maxStorageSize || count($files) > $this->maxFiles) {
+            $this->cleanupStorage($files);
+        }
+    }
+    
+    private function cleanupStorage($files) {
+        // Sort files by modification time (oldest first)
+        usort($files, function($a, $b) {
+            return $a['mtime'] - $b['mtime'];
+        });
+        
+        $currentSize = array_sum(array_column($files, 'size'));
+        $currentCount = count($files);
+        
+        $targetSize = $this->maxStorageSize * 0.8; // Clean to 80% of max
+        $targetCount = $this->maxFiles * 0.8; // Clean to 80% of max files
+        
+        // Delete oldest files until we're under limits
+        foreach ($files as $file) {
+            if ($currentSize <= $targetSize && $currentCount <= $targetCount) {
+                break;
+            }
+            
+            if (unlink($file['filename'])) {
+                $currentSize -= $file['size'];
+                $currentCount--;
+            }
+        }
+    }
+    
+    public function getStorageUsage() {
+        if (!is_dir($this->storagePath)) {
+            return ['size' => 0, 'files' => 0];
+        }
+        
+        $totalSize = 0;
+        $fileCount = 0;
+        
+        foreach (new DirectoryIterator($this->storagePath) as $fileInfo) {
+            if ($fileInfo->isDot() || $fileInfo->isDir()) {
+                continue;
+            }
+            $totalSize += $fileInfo->getSize();
+            $fileCount++;
+        }
+        
+        return [
+            'size' => $totalSize,
+            'files' => $fileCount,
+            'max_size' => $this->maxStorageSize,
+            'max_files' => $this->maxFiles,
+            'usage_percent' => ($totalSize / $this->maxStorageSize) * 100
+        ];
+    }
+}
+
 class ChallengeRateLimiter {
     private $maxRequests;
     private $timeWindow;
     private $storagePath;
+    private $storageManager;
     
-    public function __construct($maxRequests = 60, $timeWindow = 60, $storagePath = null) {
+    public function __construct($maxRequests = 60, $timeWindow = 60, $storagePath = null, $maxStorageSize = 104857600) {
         $this->maxRequests = $maxRequests;
         $this->timeWindow = $timeWindow;
-        $this->storagePath = $storagePath ?: sys_get_temp_dir();
+        $this->storagePath = $storagePath ?: __DIR__ . '/rate_limits';
+        $this->storageManager = new SecureStorageManager($this->storagePath, $maxStorageSize);
     }
     
     public function isAllowed($identifier) {
+        $this->storageManager->enforceStorageLimits();
+        
         $filename = $this->getFilename($identifier);
         $requests = [];
         
         if (file_exists($filename)) {
-            $data = file_get_contents($filename);
-            $requests = json_decode($data, true) ?: [];
-            
-            // Remove requests outside the time window
-            $currentTime = time();
-            $requests = array_filter($requests, function($time) use ($currentTime) {
-                return ($currentTime - $time) < $this->timeWindow;
-            });
+            // Check file size to prevent DoS
+            if (filesize($filename) > 102400) { // 100KB max per file
+                unlink($filename);
+            } else {
+                $data = file_get_contents($filename);
+                $requests = json_decode($data, true) ?: [];
+            }
         }
+        
+        // Remove requests outside the time window
+        $currentTime = time();
+        $requests = array_filter($requests, function($time) use ($currentTime) {
+            return ($currentTime - $time) < $this->timeWindow;
+        });
         
         if (count($requests) >= $this->maxRequests) {
             return false;
         }
         
         $requests[] = time();
-        file_put_contents($filename, json_encode($requests));
+        
+        // Secure file write with locking
+        if ($fp = fopen($filename, 'c+')) {
+            if (flock($fp, LOCK_EX)) {
+                ftruncate($fp, 0);
+                fwrite($fp, json_encode($requests));
+                flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
+        
         return true;
     }
     
@@ -142,6 +259,10 @@ class ChallengeRateLimiter {
     private function getFilename($identifier) {
         return $this->storagePath . '/challenge_requests_' . md5($identifier);
     }
+    
+    public function getStorageInfo() {
+        return $this->storageManager->getStorageUsage();
+    }
 }
 
 class FailureRateLimiter {
@@ -149,15 +270,19 @@ class FailureRateLimiter {
     private $failureWindow;
     private $blockDuration;
     private $storagePath;
+    private $storageManager;
     
-    public function __construct($maxFailures = 5, $failureWindow = 900, $blockDuration = 1800, $storagePath = null) {
+    public function __construct($maxFailures = 5, $failureWindow = 900, $blockDuration = 1800, $storagePath = null, $maxStorageSize = 104857600) {
         $this->maxFailures = $maxFailures;
         $this->failureWindow = $failureWindow;
         $this->blockDuration = $blockDuration;
-        $this->storagePath = $storagePath ?: sys_get_temp_dir();
+        $this->storagePath = $storagePath ?: __DIR__ . '/rate_limits';
+        $this->storageManager = new SecureStorageManager($this->storagePath, $maxStorageSize);
     }
     
     public function recordSuccess($identifier) {
+        $this->storageManager->enforceStorageLimits();
+        
         // Reset failure count on successful authentication
         $filename = $this->getFilename($identifier);
         if (file_exists($filename)) {
@@ -167,23 +292,39 @@ class FailureRateLimiter {
     }
     
     public function recordFailure($identifier) {
+        $this->storageManager->enforceStorageLimits();
+        
         $filename = $this->getFilename($identifier);
         $failures = [];
         
         if (file_exists($filename)) {
-            $data = file_get_contents($filename);
-            $failures = json_decode($data, true) ?: [];
-            
-            // Remove failures outside the time window
-            $currentTime = time();
-            $failures = array_filter($failures, function($time) use ($currentTime) {
-                return ($currentTime - $time) < $this->failureWindow;
-            });
+            // Check file size to prevent DoS
+            if (filesize($filename) > 102400) { // 100KB max per file
+                unlink($filename);
+            } else {
+                $data = file_get_contents($filename);
+                $failures = json_decode($data, true) ?: [];
+            }
         }
+        
+        // Remove failures outside the time window
+        $currentTime = time();
+        $failures = array_filter($failures, function($time) use ($currentTime) {
+            return ($currentTime - $time) < $this->failureWindow;
+        });
         
         // Add current failure
         $failures[] = time();
-        file_put_contents($filename, json_encode($failures));
+        
+        // Secure file write with locking
+        if ($fp = fopen($filename, 'c+')) {
+            if (flock($fp, LOCK_EX)) {
+                ftruncate($fp, 0);
+                fwrite($fp, json_encode($failures));
+                flock($fp, LOCK_UN);
+            }
+            fclose($fp);
+        }
         
         return count($failures);
     }
@@ -260,6 +401,10 @@ class FailureRateLimiter {
     
     private function getFilename($identifier) {
         return $this->storagePath . '/auth_failures_' . md5($identifier);
+    }
+    
+    public function getStorageInfo() {
+        return $this->storageManager->getStorageUsage();
     }
 }
 
@@ -427,8 +572,12 @@ class PublicKeyAuthenticator {
         
         $data = $randomChallenge . '|' . $this->sharedSecret . '|' . $timestamp;
         
+        // Add HMAC for integrity protection
+        $hmac = hash_hmac('sha256', $data, $this->sharedSecret);
+        $dataWithHmac = $data . '|' . $hmac;
+        
         $iv = random_bytes(16);
-        $encrypted = openssl_encrypt($data, 'AES-256-CBC', $this->sharedSecret, 0, $iv);
+        $encrypted = openssl_encrypt($dataWithHmac, 'AES-256-CBC', $this->sharedSecret, 0, $iv);
         
         if ($encrypted === false) {
             throw new Exception("Failed to encrypt challenge");
@@ -456,11 +605,19 @@ class PublicKeyAuthenticator {
         }
         
         $parts = explode('|', $decrypted);
-        if (count($parts) !== 3) {
+        if (count($parts) !== 4) {
             throw new Exception("Invalid challenge format");
         }
         
-        list($randomChallenge, $secret, $timestamp) = $parts;
+        list($randomChallenge, $secret, $timestamp, $hmac) = $parts;
+        
+        // Verify HMAC first to prevent timing attacks
+        $dataToVerify = $randomChallenge . '|' . $secret . '|' . $timestamp;
+        $expectedHmac = hash_hmac('sha256', $dataToVerify, $this->sharedSecret);
+        
+        if (!hash_equals($hmac, $expectedHmac)) {
+            throw new Exception("Challenge integrity check failed");
+        }
         
         if (!hash_equals($secret, $this->sharedSecret)) {
             throw new Exception("Shared secret mismatch");
@@ -488,9 +645,18 @@ function log_message($message, $debugMode) {
     }
 }
 
+function format_bytes($bytes, $precision = 2) {
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $bytes = max($bytes, 0);
+    $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+    $pow = min($pow, count($units) - 1);
+    $bytes /= pow(1024, $pow);
+    return round($bytes, $precision) . ' ' . $units[$pow];
+}
+
 try {
     // Initialize failure-based rate limiter
-    $rateLimiter = new FailureRateLimiter($maxConsecutiveFailures, $failureWindow, $blockDuration);
+    $rateLimiter = new FailureRateLimiter($maxConsecutiveFailures, $failureWindow, $blockDuration, null, $maxStorageSize);
     $clientIdentifier = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     
     // Check if client is blocked due to too many failures
@@ -504,7 +670,7 @@ try {
     
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         // Lightweight protection against challenge request floods
-        $challengeLimiter = new ChallengeRateLimiter($maxChallengesPerMinute, 60);
+        $challengeLimiter = new ChallengeRateLimiter($maxChallengesPerMinute, 60, null, $maxStorageSize);
         if (!$challengeLimiter->isAllowed($clientIdentifier)) {
             throw new Exception("Too many challenge requests. Please slow down.");
         }
@@ -513,12 +679,25 @@ try {
         
         $encryptedChallenge = $authenticator->generateEncryptedChallenge();
         
-        echo json_encode([
+        $response = [
             'status' => 'challenge',
             'challenge' => $encryptedChallenge,
             'remaining_attempts' => $rateLimiter->getRemainingAttempts($clientIdentifier),
             'remaining_challenges' => $challengeLimiter->getRemainingChallenges($clientIdentifier)
-        ]);
+        ];
+        
+        // Add storage info in debug mode
+        if ($debugMode) {
+            $storageInfo = $challengeLimiter->getStorageInfo();
+            $response['storage_info'] = [
+                'used' => format_bytes($storageInfo['size']),
+                'max' => format_bytes($storageInfo['max_size']),
+                'usage_percent' => round($storageInfo['usage_percent'], 1) . '%',
+                'files' => $storageInfo['files']
+            ];
+        }
+        
+        echo json_encode($response);
         
     } elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
         log_message("Authentication attempt from IP: " . $clientIdentifier, $debugMode);
@@ -539,7 +718,7 @@ try {
             $rateLimiter->recordSuccess($clientIdentifier);
             log_message("Authentication SUCCESS for IP: " . $clientIdentifier, $debugMode);
             
-            echo json_encode([
+            $response = [
                 'status' => 'success',
                 'data' => [
                     'secret_message' => 'Authentication successful! Your protected data is here.',
@@ -547,7 +726,20 @@ try {
                     'user' => 'authenticated_client',
                     'remaining_attempts' => $rateLimiter->getRemainingAttempts($clientIdentifier)
                 ]
-            ]);
+            ];
+            
+            // Add storage info in debug mode
+            if ($debugMode) {
+                $storageInfo = $rateLimiter->getStorageInfo();
+                $response['storage_info'] = [
+                    'used' => format_bytes($storageInfo['size']),
+                    'max' => format_bytes($storageInfo['max_size']),
+                    'usage_percent' => round($storageInfo['usage_percent'], 1) . '%',
+                    'files' => $storageInfo['files']
+                ];
+            }
+            
+            echo json_encode($response);
         } else {
             // FAILURE: Record failed attempt and check if blocked
             $failureCount = $rateLimiter->recordFailure($clientIdentifier);

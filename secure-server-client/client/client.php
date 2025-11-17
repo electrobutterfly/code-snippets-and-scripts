@@ -15,14 +15,14 @@
 //////////////////////////////////////////////////////////////////////
 
 // ==========================================
-// USER CONFIGURATION - UPDATE THESE VALUES!
+// USER CONFIGURATION - UPDATE THERS VALUES!
 // ==========================================
 
-$privateKeyPath = './keys/dummy.key';
-$serverUrl = 'https://testdomain.com/auth/test.php';
-$sharedSecret = '1820010959935ß5&dajadouu8..asusts$gg';
+$privateKeyPath = $_ENV['AUTH_PRIVATE_KEY_PATH'] ?? './keys/dummy.key';
+$serverUrl = $_ENV['AUTH_SERVER_URL'] ?? 'https://domain.com/auth/server2.php';
+$sharedSecret = $_ENV['AUTH_SHARED_SECRET'] ?? '1820010959935ß5&dajadouu8..asusts$gg';
 $debugMode = true;
-$verifySSL = false;  // SECURITY FIX: Enable SSL verification
+$verifySSL = false;  // SECURITY NOTE: Set to true in production environment
 
 // ==========================================
 // SECURITY HARDENED - DON'T MODIFY BELOW
@@ -34,6 +34,8 @@ class ClientAuthenticator {
     private $sharedSecret;
     private $debug;
     private $verifySSL;
+    private $lastRequestTime = 0;
+    private $minRequestInterval = 0.1; // 100 milliseconds minimum between requests
     
     public function __construct($privateKeyPath, $serverUrl, $sharedSecret, $debug = false, $verifySSL = true) {
         $this->privateKeyPath = $privateKeyPath;
@@ -49,20 +51,30 @@ class ClientAuthenticator {
         }
     }
     
+    private function enforceRateLimit() {
+        $now = microtime(true);
+        if (($now - $this->lastRequestTime) < $this->minRequestInterval) {
+            throw new Exception("Rate limit exceeded - please wait between requests");
+        }
+        $this->lastRequestTime = $now;
+    }
+    
     private function makeRequest($url, $postData = null) {
+        $this->enforceRateLimit();
+        
         $contextOptions = [
             'http' => [
                 'timeout' => 30,
                 'ignore_errors' => true,
-                'user_agent' => 'SecureAuthClient/1.0'
+                'user_agent' => 'SecureAuthClient/1.0',
+                'follow_location' => 0 // Prevent redirect attacks
             ],
             'ssl' => [
-                // SECURITY FIX: Enable SSL verification
                 'verify_peer' => $this->verifySSL,
                 'verify_peer_name' => $this->verifySSL,
                 'allow_self_signed' => false,
                 'verify_depth' => 5,
-                'ciphers' => 'HIGH:!SSLv2:!SSLv3:!TLSv1:!TLSv1.1'
+                'ciphers' => 'ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS'
             ]
         ];
         
@@ -81,6 +93,18 @@ class ClientAuthenticator {
         }
         
         return $response;
+    }
+    
+    private function validateServerResponse($responseData) {
+        if (!isset($responseData['status'])) {
+            throw new Exception("Invalid server response - no status field");
+        }
+        
+        if (!in_array($responseData['status'], ['challenge', 'success', 'error'])) {
+            throw new Exception("Invalid server response - unknown status: " . $responseData['status']);
+        }
+        
+        return true;
     }
     
     private function decryptChallenge($encryptedChallenge) {
@@ -104,11 +128,19 @@ class ClientAuthenticator {
         }
         
         $parts = explode('|', $decrypted);
-        if (count($parts) !== 3) {
+        if (count($parts) !== 4) {
             throw new Exception("Invalid challenge format");
         }
         
-        list($randomChallenge, $secret, $timestamp) = $parts;
+        list($randomChallenge, $secret, $timestamp, $hmac) = $parts;
+        
+        // Verify HMAC for integrity
+        $dataToVerify = $randomChallenge . '|' . $secret . '|' . $timestamp;
+        $expectedHmac = hash_hmac('sha256', $dataToVerify, $this->sharedSecret);
+        
+        if (!hash_equals($hmac, $expectedHmac)) {
+            throw new Exception("Challenge integrity check failed");
+        }
         
         // SECURITY FIX: Use hash_equals to prevent timing attacks
         if (!hash_equals($secret, $this->sharedSecret)) {
@@ -116,7 +148,7 @@ class ClientAuthenticator {
         }
         
         $this->log("✓ Challenge decrypted successfully");
-        $this->log("Random challenge: " . $randomChallenge);
+        $this->log("Challenge length: " . strlen($randomChallenge) . " bytes");
         $this->log("Timestamp: " . date('Y-m-d H:i:s', $timestamp));
         
         return $randomChallenge;
@@ -158,7 +190,6 @@ class ClientAuthenticator {
     
     private function signData($data, $privateKey) {
         $this->log("=== Signing Data ===");
-        $this->log("Data to sign: " . $data);
         $this->log("Data length: " . strlen($data) . " bytes");
         
         $signature = '';
@@ -174,7 +205,6 @@ class ClientAuthenticator {
         
         if ($this->debug) {
             $this->log("Signature length: " . strlen($signature) . " bytes");
-            $this->log("Base64 signature (first 100 chars): " . substr($base64Signature, 0, 100) . "...");
         }
         
         return $base64Signature;
@@ -199,19 +229,24 @@ class ClientAuthenticator {
             
             $this->log("✓ Received response from server");
             
-            if ($this->debug) {
-                $this->log("Raw response: " . $challengeResponse);
-            }
-            
             $challengeData = json_decode($challengeResponse, true);
             
             if (json_last_error() !== JSON_ERROR_NONE) {
                 throw new Exception("Invalid JSON response from server: " . json_last_error_msg());
             }
-            
-            if (!isset($challengeData['status'])) {
-                throw new Exception("No status in server response");
+
+            // DEBUG: Check what the server actually returned (only in debug mode)
+            if ($this->debug && $challengeData['status'] === 'error') {
+                $this->log("❌ SERVER ERROR DETAILS:");
+                $this->log("Error message: " . ($challengeData['message'] ?? 'No message'));
+                $this->log("Remaining attempts: " . ($challengeData['remaining_attempts'] ?? 'unknown'));
+                if (isset($challengeData['block_time_remaining'])) {
+                    $this->log("Block time remaining: " . $challengeData['block_time_remaining'] . " seconds");
+                }
             }
+
+            // Validate server response structure
+            $this->validateServerResponse($challengeData);
             
             if ($challengeData['status'] !== 'challenge') {
                 throw new Exception("Unexpected server response. Expected 'challenge', got: " . $challengeData['status']);
@@ -224,10 +259,6 @@ class ClientAuthenticator {
             $encryptedChallenge = $challengeData['challenge'];
             $this->log("✓ Encrypted challenge received");
             $this->log("Remaining attempts: " . ($challengeData['remaining_attempts'] ?? 'unknown'));
-            
-            if ($this->debug) {
-                $this->log("Encrypted challenge (first 100 chars): " . substr($encryptedChallenge, 0, 100) . "...");
-            }
             
             // Step 2: Decrypt the challenge
             $this->log("\n=== Step 2: Decrypting Challenge ===");
@@ -247,19 +278,21 @@ class ClientAuthenticator {
                 'challenge' => $encryptedChallenge
             ];
             
+            // Reset rate limit timer for authentication flow steps
+            $this->lastRequestTime = 0;
+            
             $response = $this->makeRequest($this->serverUrl, $postData);
             $this->log("✓ Final response received");
-            
-            if ($this->debug) {
-                $this->log("Raw response: " . $response);
-            }
             
             $result = json_decode($response, true);
             
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $error = json_last_error_msg();
-                throw new Exception("Invalid JSON in final response: " . $error . " - Response: " . substr($response, 0, 200));
+                throw new Exception("Invalid JSON in final response: " . $error);
             }
+            
+            // Validate final server response
+            $this->validateServerResponse($result);
             
             // Clean up
             openssl_free_key($privateKey);
