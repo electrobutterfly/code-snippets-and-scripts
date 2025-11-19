@@ -34,6 +34,12 @@ This software written in php is a secure challenge-response authentication syste
 
 
 
+## [📁 PolyDefense - A Hybrid SSL Authentication System](./polydefense)
+
+This system provides robust mutual authentication between a client and server in PHP, using a hybrid approach that combines the best aspects of certificate-based and public key authentication, after passing the ip whitelist as a first line defense. It uses a challenge-response protocol with digital signatures to ensure both parties can verify each other's identity without shared secrets.
+
+
+
 ## Authors and acknowledgment
 
 © 2025 Klaus Simon.
