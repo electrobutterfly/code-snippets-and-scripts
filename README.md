@@ -54,11 +54,12 @@ Projects are licensed under the Custom Attribution-NonCommercial Sale License un
 - Incorporate it into your own projects.
 
 **The main restriction:**
+
 - You cannot sell a product **whose primary purpose is to resell this software's functionality**.
 
 **For commercial sale licensing,** please contact: licensing@electrobutterfly.com
 
-*See the [LICENSE](./LICENSE) file for full terms.*
+*See the [Custom Attribution-NonCommercial Sale License](./CASC-LICENSE) and the [MIT-LICENSE](./MIT-LICENSE) file for full terms.*
 
 ## Project status
 
