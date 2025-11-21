@@ -1,6 +1,6 @@
 <?php
 //////////////////////////////////////////////////////////////////////
-// server.php v1.1
+// server.php (v1.2)
 // @copyright     (c) 2025 Klaus Simon
 // @license       Custom Attribution-NonCommercial Sale License
 // @description   PolyDefense - A Hybrid SSL Authentication System
@@ -46,7 +46,7 @@ $alertDaysThreshold = 30;  // Send alerts 30 days before expiry
 
 // Rate limiting configuration
 $maxRequestsPerMinute = 60;
-$debugMode = true; // NOTE: Ensure this is FALSE in production!
+$debugMode = true; // SET TO FALSE IN PRODUCTION!
 
 // Storage configuration
 $storagePath = './storage';                         // Secure storage directory
@@ -173,39 +173,50 @@ if (!empty($expectedClientCertFingerprint) && !preg_match('/^[a-f0-9]{64}$/i', $
 }
 
 class SecurityValidator {
+    // Memory Exhaustion Protection - Stream Reader
     public static function validateJsonInput($maxSize = 102400) {
-        $contentLength = $_SERVER['CONTENT_LENGTH'] ?? 0;
+        $contentLength = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
         
         if ($contentLength > $maxSize) {
             throw new ValidationException("Input too large");
         }
         
-        $input = file_get_contents('php://input');
-        
-        if (strlen($input) > $maxSize) {
-            throw new ValidationException("Input too large");
+        $input = '';
+        $fp = fopen('php://input', 'r');
+        if (!$fp) {
+            throw new ValidationException("Could not open input stream");
         }
+
+        $totalRead = 0;
+        while (!feof($fp)) {
+            $chunk = fread($fp, 8192); // Read in 8KB chunks
+            if ($chunk === false) break;
+            $totalRead += strlen($chunk);
+            $input .= $chunk;
+
+            if ($totalRead > $maxSize) {
+                fclose($fp);
+                throw new ValidationException("Input too large");
+            }
+        }
+        fclose($fp);
         
         if (empty($input)) {
             throw new ValidationException("No input data received");
         }
         
-        // SECURITY FIX: Added depth limit (512) and JSON_THROW_ON_ERROR
-        $data = json_decode($input, true, 512);
-        
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new ValidationException("Invalid JSON format");
-        }
+        // JSON DoS Protection - Depth Limit
+        $data = json_decode($input, true, 512, JSON_THROW_ON_ERROR);
         
         return $data;
     }
     
     public static function validateSignature($signature) {
-        if (empty($signature) || strlen($signature) > 1000) {
+        if (empty($signature) || strlen($signature) > 4096) {
             throw new ValidationException("Invalid signature format");
         }
         
-        if (!preg_match('/^[a-zA-Z0-9+\/]+={0,2}$/', $signature) || (strlen($signature) % 4 !== 0)) {
+        if (!preg_match('/^[a-zA-Z0-9+\/]+={0,2}$/', $signature)) {
             throw new ValidationException("Invalid signature encoding");
         }
         
@@ -217,7 +228,7 @@ class SecurityValidator {
             throw new ValidationException("Invalid challenge format");
         }
         
-        if (!preg_match('/^[a-zA-Z0-9+\/]+={0,2}$/', $challenge) || (strlen($challenge) % 4 !== 0)) {
+        if (!preg_match('/^[a-zA-Z0-9+\/]+={0,2}$/', $challenge)) {
             throw new ValidationException("Invalid challenge encoding");
         }
         
@@ -229,7 +240,7 @@ class SecurityValidator {
             return null;
         }
         
-        if (strlen($certificate) > 10000) {
+        if (strlen($certificate) > 16384) {
             throw new ValidationException("Certificate too large");
         }
         
@@ -270,138 +281,188 @@ class SecureStorageManager {
     private function initializeStorage() {
         if (!is_dir($this->storagePath)) {
             if (!mkdir($this->storagePath, 0700, true)) {
-                throw new Exception("Failed to create storage directory: " . $this->storagePath);
+                throw new ConfigurationException("Failed to create storage directory");
             }
             $this->log("Created storage directory: " . $this->storagePath);
         }
         
+        // Create locks directory for atomic operations
+        $locksDir = $this->storagePath . '/locks';
+        
+        // FIX: Race Condition in Lock Directory Creation
+        // Logic: If it doesn't exist AND we fail to make it AND it still doesn't exist -> Error
+        if (!is_dir($locksDir) && !@mkdir($locksDir, 0700, true) && !is_dir($locksDir)) {
+            throw new ConfigurationException("Failed to create locks directory");
+        }
+        
+        // Set secure permissions on directory
         if (is_dir($this->storagePath)) {
             if (!chmod($this->storagePath, 0700)) {
-                throw new Exception("Failed to set secure permissions on storage directory");
+                throw new ConfigurationException("Failed to set secure permissions");
             }
         }
         
+        // Initialize secret file
         $this->initializeSecret();
+        
+        $this->log("Storage initialized: " . $this->storagePath);
     }
     
     private function initializeSecret() {
         $secretFile = $this->storagePath . '/.secret';
         if (!file_exists($secretFile)) {
             if (!function_exists('random_bytes')) {
-                throw new Exception("Secure random generator unavailable");
+                throw new SecurityException("Secure random generator unavailable");
             }
             
-            $secret = bin2hex(random_bytes(32));
+            // FIX: Entropy check
+            try {
+                $secret = bin2hex(random_bytes(32));
+            } catch (Exception $e) {
+                throw new SecurityException("System entropy source failure");
+            }
+
             if (file_put_contents($secretFile, $secret) === false) {
-                throw new Exception("Failed to create secret file");
+                throw new SecurityException("Failed to create secret file");
             }
             if (!chmod($secretFile, 0600)) {
-                throw new Exception("Failed to set secure permissions on secret file");
+                throw new SecurityException("Failed to set secure permissions on secret file");
             }
             $this->log("Generated new storage secret");
         }
     }
-    
-    // Helper for Internal HMAC generation (Challenge Security)
+
     public function getSecretHash() {
         return $this->getStorageSecret();
     }
-    
-    /**
-     * SECURITY FIX: Atomic Read-Modify-Write Operation
-     * Prevents Race Conditions in Rate Limiting
-     */
+
+    // FIX: Directory-based Atomic Locking with Exponential Backoff
+    private function acquireLock($filename) {
+        $lockDir = $this->storagePath . '/locks/' . md5($filename);
+        // mkdir is atomic
+        if (@mkdir($lockDir, 0700)) {
+            return $lockDir;
+        }
+        return false;
+    }
+
+    private function releaseLock($lockDir) {
+        if ($lockDir && is_dir($lockDir)) {
+            @rmdir($lockDir);
+        }
+    }
+
+    // Helper for exponential backoff
+    private function waitForLock($filename) {
+        $lockDir = false;
+        $attempts = 0;
+        
+        // Try for approx 1 second total
+        while (!$lockDir && $attempts < 10) {
+            $lockDir = $this->acquireLock($filename);
+            if (!$lockDir) {
+                // Exponential backoff: 5ms, 10ms, 20ms... capped
+                // 5000us * 2^attempt
+                $baseWait = 5000 * pow(2, $attempts);
+                $jitter = rand(0, 1000);
+                $wait = min(200000, $baseWait + $jitter); // Cap at 200ms
+                
+                usleep((int)$wait);
+                $attempts++;
+            }
+        }
+        
+        return $lockDir;
+    }
+
     public function atomicJsonUpdate($filename, callable $callback) {
         $this->enforceStorageLimits();
         $filepath = $this->storagePath . '/' . $filename;
         
         if (!$this->isValidFilename($filename)) {
-            throw new ValidationException("Invalid filename: " . $filename);
+            throw new ValidationException("Invalid filename");
         }
 
-        $fp = fopen($filepath, 'c+'); // Open for reading and writing; place pointer at beginning
-        if (!$fp) {
-            throw new Exception("Failed to open file for atomic update: " . $filename);
-        }
-
-        if (!flock($fp, LOCK_EX)) { // Acquire Exclusive Lock
-            fclose($fp);
-            throw new Exception("Failed to acquire lock for file: " . $filename);
+        $lockDir = $this->waitForLock($filename);
+        if (!$lockDir) {
+            throw new SecurityException("System busy: could not acquire lock");
         }
 
         try {
-            // READ
-            $fileContent = '';
-            while (!feof($fp)) {
-                $fileContent .= fread($fp, 8192);
-            }
-            
+            // Read existing
             $currentData = [];
-            if (!empty($fileContent)) {
-                // Verify integrity of existing data
-                $storedJson = json_decode($fileContent, true);
-                if ($storedJson && isset($storedJson['data'], $storedJson['hmac'])) {
-                    $expectedHmac = hash_hmac('sha256', $storedJson['data'], $this->getStorageSecret());
-                    if (hash_equals($storedJson['hmac'], $expectedHmac)) {
-                        $decodedData = base64_decode($storedJson['data']);
-                        $currentData = json_decode($decodedData, true) ?: [];
+            if (file_exists($filepath)) {
+                $fileContent = file_get_contents($filepath);
+                if ($fileContent) {
+                    $stored = json_decode($fileContent, true);
+                    if ($stored && isset($stored['data'], $stored['hmac'])) {
+                        $expectedHmac = hash_hmac('sha256', $stored['data'], $this->getStorageSecret());
+                        if (hash_equals($stored['hmac'], $expectedHmac)) {
+                            $currentData = json_decode(base64_decode($stored['data']), true) ?: [];
+                        }
                     }
                 }
             }
 
-            // MODIFY (Callback)
+            // Apply callback logic
             $newData = $callback($currentData);
-            
-            // WRITE PREP
-            $jsonToSave = json_encode($newData);
-            if (strlen($jsonToSave) > $this->maxFileSize) {
-                 // Don't write if too big, but return false to indicate failure logic
-                 throw new ValidationException("Atomic update exceeded file size limit");
-            }
 
-            $base64Data = base64_encode($jsonToSave);
-            $hmac = hash_hmac('sha256', $base64Data, $this->getStorageSecret());
+            // Write back
+            $jsonData = json_encode($newData);
+            $base64 = base64_encode($jsonData);
+            $hmac = hash_hmac('sha256', $base64, $this->getStorageSecret());
+            
             $finalPayload = json_encode([
-                'data' => $base64Data,
+                'data' => $base64,
                 'hmac' => $hmac,
-                'timestamp' => time(),
-                'compressed' => false
+                'timestamp' => time()
             ]);
 
-            // WRITE
-            ftruncate($fp, 0);
-            rewind($fp);
-            fwrite($fp, $finalPayload);
-            fflush($fp);
+            // Atomic write using temp file and rename
+            $tempFile = $filepath . '.tmp';
+            if (file_put_contents($tempFile, $finalPayload) !== false) {
+                // FIX: fsync for durability (if supported)
+                if (function_exists('fsync')) {
+                    $fp = fopen($tempFile, 'r+');
+                    if ($fp) {
+                        fsync($fp);
+                        fclose($fp);
+                    }
+                }
+                rename($tempFile, $filepath);
+            } else {
+                throw new SecurityException("Failed to write storage file");
+            }
 
-        } catch (Exception $e) {
-            flock($fp, LOCK_UN);
-            fclose($fp);
-            throw $e;
+        } finally {
+            $this->releaseLock($lockDir);
         }
 
-        flock($fp, LOCK_UN);
-        fclose($fp);
         return true;
     }
-
+    
     public function writeFile($filename, $data, $compress = false) {
         $this->enforceStorageLimits();
         
         $filepath = $this->storagePath . '/' . $filename;
         
+        // Validate filename to prevent directory traversal
         if (!$this->isValidFilename($filename)) {
-            throw new ValidationException("Invalid filename: " . $filename);
+            throw new ValidationException("Invalid filename");
         }
         
+        // Check file size limit
         if (strlen($data) > $this->maxFileSize) {
             throw new ValidationException("File size exceeds limit");
         }
         
+        // Compress data if requested
         if ($compress && function_exists('gzcompress')) {
             $data = gzcompress($data, 9);
+            $this->log("Compressed data: " . $this->format_bytes(strlen($data)));
         }
         
+        // Add HMAC for integrity protection
         $hmac = hash_hmac('sha256', $data, $this->getStorageSecret());
         $fileData = json_encode([
             'data' => base64_encode($data),
@@ -410,19 +471,28 @@ class SecureStorageManager {
             'compressed' => $compress
         ]);
         
-        if ($fp = fopen($filepath, 'c+')) {
-            if (flock($fp, LOCK_EX)) {
-                ftruncate($fp, 0);
+        // FIX: Directory locking + fsync
+        $lockDir = $this->waitForLock($filename);
+        if (!$lockDir) {
+             throw new SecurityException("System busy: could not acquire lock");
+        }
+
+        try {
+            $fp = fopen($filepath, 'w');
+            if ($fp) {
                 fwrite($fp, $fileData);
-                fflush($fp);
-                flock($fp, LOCK_UN);
-            } else {
+                fflush($fp); 
+                // FIX: fsync for durability
+                if (function_exists('fsync')) {
+                    fsync($fp);
+                }
                 fclose($fp);
-                throw new Exception("Failed to acquire lock for file: " . $filename);
+                $this->log("File written: " . $filename);
+            } else {
+                throw new SecurityException("Failed to open file for writing: " . $filename);
             }
-            fclose($fp);
-        } else {
-            throw new Exception("Failed to open file for writing: " . $filename);
+        } finally {
+            $this->releaseLock($lockDir);
         }
         
         return true;
@@ -435,43 +505,47 @@ class SecureStorageManager {
             return null;
         }
         
+        // Validate filename
         if (!$this->isValidFilename($filename)) {
-            throw new ValidationException("Invalid filename: " . $filename);
+            throw new ValidationException("Invalid filename");
         }
         
-        if ($fp = fopen($filepath, 'r')) {
-            if (flock($fp, LOCK_SH)) {
-                $fileData = file_get_contents($filepath);
-                flock($fp, LOCK_UN);
-            } else {
-                fclose($fp);
-                throw new Exception("Failed to acquire lock for reading: " . $filename);
-            }
-            fclose($fp);
-        } else {
-            throw new Exception("Failed to open file for reading: " . $filename);
+        // FIX: Directory locking for read
+        $lockDir = $this->waitForLock($filename);
+        if (!$lockDir) {
+             throw new SecurityException("System busy: could not acquire lock");
+        }
+
+        $fileData = '';
+        try {
+            $fileData = file_get_contents($filepath);
+        } finally {
+            $this->releaseLock($lockDir);
         }
         
         $data = json_decode($fileData, true);
         if (!$data || !isset($data['data']) || !isset($data['hmac'])) {
-            // Silently remove corrupted files to prevent clutter
+            $this->log("Corrupted file detected: " . $filename);
             @unlink($filepath);
             return null;
         }
         
+        // Verify HMAC
         $expectedHmac = hash_hmac('sha256', $data['data'], $this->getStorageSecret());
         if (!hash_equals($data['hmac'], $expectedHmac)) {
             $this->log("HMAC verification failed for file: " . $filename);
-            @unlink($filepath); // Security: Delete tampered files
+            @unlink($filepath);
             return null;
         }
         
         $content = base64_decode($data['data']);
         
+        // Decompress if needed
         if (isset($data['compressed']) && $data['compressed'] && function_exists('gzuncompress')) {
             $content = gzuncompress($content);
         }
         
+        $this->log("File read: " . $filename . " (" . $this->format_bytes(strlen($content)) . ")");
         return $content;
     }
     
@@ -480,9 +554,10 @@ class SecureStorageManager {
         
         if (file_exists($filepath)) {
             if (unlink($filepath)) {
+                $this->log("File deleted: " . $filename);
                 return true;
             } else {
-                throw new Exception("Failed to delete file: " . $filename);
+                throw new SecurityException("Failed to delete file: " . $filename);
             }
         }
         return false;
@@ -496,17 +571,25 @@ class SecureStorageManager {
     public function enforceStorageLimits() {
         $usage = $this->getStorageUsage();
         
+        $this->log("Storage usage: " . $this->format_bytes($usage['total_size']) . " / " . 
+                  $this->format_bytes($this->maxStorageSize) . " (" . 
+                  round(($usage['total_size'] / $this->maxStorageSize) * 100, 2) . "%), " . 
+                  $usage['file_count'] . " / " . $this->maxFileCount . " files");
+        
+        // Check if we need to cleanup
         if ($usage['total_size'] > ($this->maxStorageSize * $this->cleanupThreshold) || 
             $usage['file_count'] > ($this->maxFileCount * $this->cleanupThreshold)) {
+            $this->log("Storage threshold exceeded, starting cleanup...");
             $this->cleanup();
         }
         
+        // Hard limits - reject if exceeded
         if ($usage['total_size'] > $this->maxStorageSize) {
-            throw new Exception("Storage limit exceeded");
+            throw new SecurityException("Storage limit exceeded");
         }
         
         if ($usage['file_count'] > $this->maxFileCount) {
-            throw new Exception("File count limit exceeded");
+            throw new SecurityException("File count limit exceeded");
         }
     }
     
@@ -524,12 +607,16 @@ class SecureStorageManager {
             }
         }
         
+        // Sort by modification time (oldest first)
         usort($files, function($a, $b) {
             return $a['mtime'] - $b['mtime'];
         });
         
         $deletedCount = 0;
+        $deletedSize = 0;
         $usage = $this->getStorageUsage();
+        
+        // Delete oldest files until we're below 50% capacity
         $targetSize = $this->maxStorageSize * 0.5;
         $targetCount = $this->maxFileCount * 0.5;
         
@@ -538,24 +625,16 @@ class SecureStorageManager {
                 break;
             }
             
-            // Prioritize deleting expired challenges
-            if (strpos($file['filename'], 'challenge_') === 0) {
-                // Always check age for challenge files (delete if > 2 mins old)
-                if (time() - $file['mtime'] > 120) {
-                    if ($this->deleteFile($file['filename'])) {
-                        $deletedCount++;
-                        $usage['total_size'] -= $file['size'];
-                        $usage['file_count']--;
-                        continue;
-                    }
-                }
-            }
-            
             if ($this->deleteFile($file['filename'])) {
                 $deletedCount++;
+                $deletedSize += $file['size'];
                 $usage['total_size'] -= $file['size'];
                 $usage['file_count']--;
             }
+        }
+        
+        if ($deletedCount > 0) {
+            $this->log("Cleanup completed: deleted " . $deletedCount . " files (" . $this->format_bytes($deletedSize) . ")");
         }
         
         return $deletedCount;
@@ -597,11 +676,9 @@ class SecureStorageManager {
         ];
     }
     
+    // FIX: Stricter Regex (Alpha-numeric start, 100 char limit, .dat extension enforced)
     private function isValidFilename($filename) {
-        return preg_match('/^[a-zA-Z0-9_\-]+(\.[a-zA-Z0-9_\-]+)*$/', $filename) && 
-               strpos($filename, '..') === false &&
-               strpos($filename, '/') === false &&
-               strpos($filename, '\\') === false;
+        return preg_match('/^[a-z0-9][a-z0-9_\-]{1,100}\.dat$/i', $filename) === 1;
     }
     
     private function getStorageSecret() {
@@ -636,9 +713,9 @@ class HybridAuthenticator {
     private $debugMode;
     private $expectedClientCertFingerprint;
     private $challengeTimeout;
-    private $storageManager; // Added for stateful challenge tracking
+    private $storageManager; 
     
-    public function __construct($serverPrivateKeyPath, $clientPublicKeyPath, $requiredClientCN, $expectedClientCertFingerprint = '', $checkExpiry = true, $debugMode = false, $challengeTimeout = 300, SecureStorageManager $storageManager) {
+    public function __construct($serverPrivateKeyPath, $clientPublicKeyPath, $requiredClientCN, $expectedClientCertFingerprint = '', $checkExpiry = true, $debugMode = false, $challengeTimeout = 300, $storageManager = null) {
         $this->serverPrivateKeyPath = $serverPrivateKeyPath;
         $this->clientPublicKeyPath = $clientPublicKeyPath;
         $this->requiredClientCN = $requiredClientCN;
@@ -666,7 +743,12 @@ class HybridAuthenticator {
             throw new SecurityException("Secure random generator unavailable");
         }
         
-        $randomChallenge = bin2hex(random_bytes(32));
+        try {
+            $randomChallenge = bin2hex(random_bytes(32));
+        } catch (Exception $e) {
+            throw new SecurityException("Entropy failure");
+        }
+
         $timestamp = time();
         $expires = $timestamp + $this->challengeTimeout;
         
@@ -677,14 +759,16 @@ class HybridAuthenticator {
             'server_id' => 'auth-server'
         ];
         
-        // Sign the challenge with server's private key
         $challengeString = $randomChallenge . '|' . $timestamp . '|' . $expires . '|' . 'auth-server';
         $signature = $this->signData($challengeString, $this->serverPrivateKeyPath);
         $challengeData['signature'] = $signature;
         
-        // SECURITY FIX: Strong HMAC using Server Secret
-        // Previously used hash of public data, now uses internal storage secret
-        $hmacKey = $this->storageManager->getSecretHash();
+        $hmacKey = '';
+        if ($this->storageManager) {
+            $hmacKey = $this->storageManager->getSecretHash();
+        } else {
+            $hmacKey = hash('sha256', $randomChallenge . $timestamp, true);
+        }
         
         $dataForHmac = [
             'challenge' => $randomChallenge,
@@ -696,31 +780,17 @@ class HybridAuthenticator {
         
         $hmac = hash_hmac('sha256', json_encode($dataForHmac), $hmacKey);
         $challengeData['hmac'] = $hmac;
+        
         $challengeData['generation_microtime'] = microtime(true);
 
-        // SECURITY FIX: Store Challenge to prevent Replay Attacks
-        $this->storeChallengeState($randomChallenge, $timestamp);
+        if ($this->storageManager) {
+            // Store with .dat extension enforced by isValidFilename
+            $this->storageManager->writeFile('chal_' . $randomChallenge . '.dat', json_encode(['ts' => $timestamp]));
+        }
         
-        $this->log("Challenge generated and stored: " . $randomChallenge);
+        $this->log("Challenge generated: " . $randomChallenge);
         
         return base64_encode(json_encode($challengeData));
-    }
-
-    // New Method: Store challenge state
-    private function storeChallengeState($challengeId, $timestamp) {
-        $filename = 'challenge_' . $challengeId . '.dat';
-        // We just store the timestamp as payload
-        $this->storageManager->writeFile($filename, json_encode(['ts' => $timestamp]));
-    }
-
-    // New Method: Consume challenge state (Delete on use)
-    private function consumeChallengeState($challengeId) {
-        $filename = 'challenge_' . $challengeId . '.dat';
-        if ($this->storageManager->fileExists($filename)) {
-            $this->storageManager->deleteFile($filename);
-            return true;
-        }
-        return false;
     }
     
     public function verifyChallengeResponse($encodedChallenge, $clientSignature, $clientCertificate = null) {
@@ -729,9 +799,11 @@ class HybridAuthenticator {
         SecurityValidator::validateChallenge($encodedChallenge);
         SecurityValidator::validateSignature($clientSignature);
         
-        if ($clientCertificate) {
-            $clientCertificate = SecurityValidator::validateCertificate($clientCertificate);
+        // Enforce Certificate
+        if (empty($clientCertificate)) {
+            throw new ValidationException("Client certificate is required");
         }
+        $clientCertificate = SecurityValidator::validateCertificate($clientCertificate);
         
         $challengeJson = base64_decode($encodedChallenge);
         if ($challengeJson === false) {
@@ -743,12 +815,12 @@ class HybridAuthenticator {
             throw new ValidationException("Invalid challenge format");
         }
         
-        // SECURITY FIX: Verify HMAC using Server Secret
         if (!isset($challengeData['hmac'])) {
             throw new ValidationException("Missing HMAC in challenge");
         }
         
         $receivedHmac = $challengeData['hmac'];
+        
         $dataForHmac = [
             'challenge' => $challengeData['challenge'],
             'timestamp' => $challengeData['timestamp'],
@@ -757,54 +829,70 @@ class HybridAuthenticator {
             'signature' => $challengeData['signature']
         ];
         
-        $hmacKey = $this->storageManager->getSecretHash();
+        $hmacKey = '';
+        if ($this->storageManager) {
+            $hmacKey = $this->storageManager->getSecretHash();
+        }
+        
         $expectedHmac = hash_hmac('sha256', json_encode($dataForHmac), $hmacKey);
         
         if (!hash_equals($receivedHmac, $expectedHmac)) {
+            $this->log("HMAC verification failed. Expected: " . $expectedHmac . ", Got: " . $receivedHmac);
             throw new ValidationException("Challenge integrity check failed");
         }
         
-        // Verify challenge hasn't expired
         if (time() > $challengeData['expires']) {
             throw new ValidationException("Challenge expired");
         }
 
-        // SECURITY FIX: Replay Attack Prevention
-        // Check if challenge exists in storage and delete it.
-        // If it doesn't exist, it was already used or never issued.
-        if (!$this->consumeChallengeState($challengeData['challenge'])) {
-            $this->log("REPLAY DETECTED or Invalid Challenge: " . $challengeData['challenge']);
-            throw new ValidationException("Invalid or already used challenge");
+        if ($this->storageManager) {
+            $chalFile = 'chal_' . $challengeData['challenge'] . '.dat';
+            if (!$this->storageManager->fileExists($chalFile)) {
+                throw new SecurityException("Challenge invalid or already used (Replay Attack)");
+            }
+            $this->storageManager->deleteFile($chalFile);
         }
         
-        // Verify server signature on challenge
         $challengeString = $challengeData['challenge'] . '|' . $challengeData['timestamp'] . '|' . $challengeData['expires'] . '|' . $challengeData['server_id'];
         if (!$this->verifySignature($challengeString, $challengeData['signature'])) {
             throw new ValidationException("Invalid challenge signature");
         }
         
+        if (isset($challengeData['generation_microtime'])) {
+            $verificationTime = microtime(true);
+            $totalTime = $verificationTime - $challengeData['generation_microtime'];
+            
+            $this->log("Challenge lifecycle: " . round($totalTime, 2) . " seconds");
+            
+            $timeRemaining = $challengeData['expires'] - time();
+            if ($timeRemaining < ($this->challengeTimeout * 0.25)) {
+                $this->log("WARNING: Challenge used with only " . $timeRemaining . " seconds remaining");
+            }
+        }
+        
         $this->log("Challenge verified: " . $challengeData['challenge']);
         
-        // Verify client signature on challenge
-        if ($clientCertificate) {
-            $this->verifyWithCertificate($challengeData['challenge'], $clientSignature, $clientCertificate);
-        } else {
-            $this->verifyWithPublicKey($challengeData['challenge'], $clientSignature, $this->clientPublicKeyPath);
-        }
+        $this->verifyWithCertificate($challengeData['challenge'], $clientSignature, $clientCertificate);
         
         $this->log("Client authentication successful");
         return $challengeData['challenge'];
     }
     
     private function verifyWithCertificate($challenge, $signature, $clientCertificatePem) {
+        $this->log("Verifying with client certificate");
+        
         $certInfo = openssl_x509_parse($clientCertificatePem);
         if ($certInfo === false) {
             throw new ValidationException("Failed to parse client certificate");
         }
         
         $clientCN = $certInfo['subject']['CN'] ?? '';
-        if (empty($clientCN) || $clientCN !== $this->requiredClientCN) {
-            throw new AuthenticationException("Client Common Name mismatch");
+        if (empty($clientCN)) {
+             throw new AuthenticationException("Client CN missing");
+        }
+
+        if (!hash_equals($this->requiredClientCN, $clientCN)) {
+            throw new AuthenticationException("Client Common Name mismatch. Expected: " . $this->requiredClientCN . ", Got: " . $clientCN);
         }
         
         if (!empty($this->expectedClientCertFingerprint)) {
@@ -812,6 +900,7 @@ class HybridAuthenticator {
             if (!hash_equals(strtolower($this->expectedClientCertFingerprint), strtolower($certFingerprint))) {
                 throw new AuthenticationException("Client certificate fingerprint mismatch");
             }
+            $this->log("Certificate fingerprint verified");
         }
         
         if ($this->checkExpiry) {
@@ -827,26 +916,6 @@ class HybridAuthenticator {
         $publicKey = openssl_pkey_get_public($clientCertificatePem);
         if (!$publicKey) {
             throw new AuthenticationException("Failed to extract public key from certificate");
-        }
-        
-        $result = openssl_verify($challenge, base64_decode($signature), $publicKey, OPENSSL_ALGO_SHA256);
-        openssl_pkey_free($publicKey);
-        
-        if ($result !== 1) {
-            throw new AuthenticationException("Invalid client signature");
-        }
-        
-        return true;
-    }
-    
-    private function verifyWithPublicKey($challenge, $signature, $publicKeyPath) {
-        if (!file_exists($publicKeyPath)) {
-            throw new AuthenticationException("Client public key not found");
-        }
-        
-        $publicKey = openssl_pkey_get_public("file://" . $publicKeyPath);
-        if (!$publicKey) {
-            throw new AuthenticationException("Failed to load client public key");
         }
         
         $result = openssl_verify($challenge, base64_decode($signature), $publicKey, OPENSSL_ALGO_SHA256);
@@ -883,6 +952,7 @@ class HybridAuthenticator {
             if (!$privateKey) {
                 throw new SecurityException("Failed to load server key for verification");
             }
+            
             $keyDetails = openssl_pkey_get_details($privateKey);
             $publicKey = openssl_pkey_get_public($keyDetails['key']);
             openssl_pkey_free($privateKey);
@@ -924,12 +994,15 @@ class CertificateExpiryMonitor {
     public function checkAndAlert($certificatePem, $clientId) {
         $certInfo = openssl_x509_parse($certificatePem);
         if ($certInfo === false) {
+            $this->log("Failed to parse certificate for expiry check");
             return false;
         }
         
         $currentTime = time();
         $validTo = $certInfo['validTo_time_t'];
         $daysUntilExpiry = floor(($validTo - $currentTime) / (60 * 60 * 24));
+        
+        $this->log("Certificate for " . $clientId . " expires in " . $daysUntilExpiry . " days");
         
         if ($daysUntilExpiry <= $this->alertThreshold) {
             $alertKey = $clientId . '_' . date('Y-m-d');
@@ -947,14 +1020,33 @@ class CertificateExpiryMonitor {
     private function sendExpiryAlert($certInfo, $clientId, $daysUntilExpiry) {
         $subject = $this->emailSubject . ": " . $clientId;
         $validTo = date('Y-m-d H:i:s', $certInfo['validTo_time_t']);
+        $serial = $certInfo['serialNumber'];
         $from = $this->emailFrom ?: 'certificate-monitor@yourdomain.com';
         
-        $message = "Certificate Expiry Alert for {$clientId}. Expires: {$validTo} ({$daysUntilExpiry} days left).";
+        $message = "
+Certificate Expiry Alert
+
+Client ID: {$clientId}
+Serial Number: {$serial}
+Expiry Date: {$validTo}
+Days Until Expiry: {$daysUntilExpiry}
+
+This certificate will expire soon. Please renew it to avoid service disruption.
+
+Generated by: PolyDefense Authentication System
+Time: " . date('Y-m-d H:i:s') . "
+        ";
         
-        if (!$this->debugMode) {
-            $headers = "From: {$from}\r\nContent-Type: text/plain; charset=UTF-8\r\n";
+        if ($this->debugMode) {
+            $this->log("WOULD SEND EMAIL ALERT: " . $subject);
+            $this->log("Message: " . $message);
+        } else {
+            $headers = "From: {$from}\r\n";
+            $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
             mail($this->adminEmail, $subject, $message, $headers);
         }
+        
+        $this->log("Expiry alert sent for certificate: " . $clientId);
     }
 }
 
@@ -970,32 +1062,26 @@ class RequestRateLimiter {
         $this->storageManager = $storageManager;
     }
     
-    /**
-     * SECURITY FIX: Uses atomicJsonUpdate to prevent Race Conditions
-     */
     public function isAllowed($identifier, $isAuthAttempt = false) {
         if ($isAuthAttempt && $this->isRecentlyAuthenticated($identifier)) {
             return true;
         }
         
+        // Enforce .dat extension
         $filename = $this->getFilename($identifier);
         $allowed = false;
-
-        // Atomic operation: Lock -> Read -> Logic -> Write -> Unlock
+        
         try {
-            $this->storageManager->atomicJsonUpdate($filename, function($requests) use (&$allowed, $isAuthAttempt, $identifier) {
-                $requests = $requests ?: [];
+            $this->storageManager->atomicJsonUpdate($filename, function($requests) use (&$allowed, $identifier, $isAuthAttempt) {
                 $currentTime = time();
+                $requests = $requests ?: [];
                 
-                // Filter old requests
                 $requests = array_filter($requests, function($time) use ($currentTime) {
                     return ($currentTime - $time) < $this->timeWindow;
                 });
                 
-                // Check limit
                 if (count($requests) < $this->maxRequests) {
                     $allowed = true;
-                    // Record new request if not a successful auth replay
                     if (!$isAuthAttempt || !$this->isRecentlyAuthenticated($identifier)) {
                         $requests[] = time();
                     }
@@ -1003,11 +1089,9 @@ class RequestRateLimiter {
                     $allowed = false;
                 }
                 
-                // Re-index array
                 return array_values($requests);
             });
         } catch (Exception $e) {
-            // Fail closed on storage errors
             return false;
         }
         
@@ -1040,8 +1124,14 @@ class RequestRateLimiter {
         }
         
         $filename = $this->getFilename($identifier);
-        $requests = $this->storageManager->readFile($filename);
-        $requests = $requests ? json_decode($requests, true) : [];
+        $requests = [];
+        
+        if ($this->storageManager->fileExists($filename)) {
+            $data = $this->storageManager->readFile($filename);
+            if ($data) {
+                $requests = json_decode($data, true) ?: [];
+            }
+        }
         
         $currentTime = time();
         $requests = array_filter($requests, function($time) use ($currentTime) {
@@ -1052,6 +1142,7 @@ class RequestRateLimiter {
     }
     
     private function getFilename($identifier) {
+        // Ensures compatibility with stricter regex
         return 'rate_limit_' . md5($identifier) . '.dat';
     }
 }
@@ -1062,20 +1153,34 @@ function log_message($message, $debugMode) {
     }
 }
 
+function format_bytes($bytes, $precision = 2) {
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $bytes = max($bytes, 0);
+    $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+    $pow = min($pow, count($units) - 1);
+    $bytes /= pow(1024, $pow);
+    return round($bytes, $precision) . ' ' . $units[$pow];
+}
+
 // MAIN REQUEST HANDLING
 try {
     ob_clean();
 
     if ($debugMode && isset($_GET['action']) && $_GET['action'] == 'timing_stats') {
         $stats = [
-            'status' => 'active',
-            'server_time' => date('Y-m-d H:i:s')
+            'challenge_timeout' => $challengeTimeout,
+            'rate_limit' => $maxRequestsPerMinute,
+            'recommended_max_client_time' => $challengeTimeout - 10,
+            'timestamp' => time(),
+            'server_time' => date('Y-m-d H:i:s'),
+            'timezone' => date_default_timezone_get(),
+            'ip_access_control_enabled' => $ipAccessControlEnabled,
+            'allowed_ips_count' => count($allowedIPs)
         ];
         echo json_encode($stats, JSON_PRETTY_PRINT);
         exit;
     }
 
-    // Initialize secure storage manager
     $storageManager = new SecureStorageManager(
         $storagePath,
         $maxStorageSize,
@@ -1085,15 +1190,21 @@ try {
         $debugMode
     );
     
-    // Initialize rate limiter with storage manager
+    if ($debugMode) {
+        $storageInfo = $storageManager->getStorageInfo();
+        log_message("=== STORAGE INFORMATION ===", $debugMode);
+        log_message("Storage Path: " . $storageInfo['path'], $debugMode);
+        log_message("Current Usage: " . round($storageInfo['usage_percent'], 2) . "% (" . 
+                   $storageInfo['current_files'] . " files)", $debugMode);
+        log_message("File Usage: " . round($storageInfo['file_usage_percent'], 2) . "%", $debugMode);
+        log_message("=== END STORAGE INFORMATION ===", $debugMode);
+    }
+    
     $rateLimiter = new RequestRateLimiter($maxRequestsPerMinute, 60, $storageManager);
     
-    // Client Identifier
     $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? 'unknown';
     $clientIdentifier = md5($clientIP . '|' . $userAgent);
     
-    // Initialize authenticator
-    // Added $storageManager dependency
     $authenticator = new HybridAuthenticator(
         $serverPrivateKeyPath,
         $clientPublicKeyPath,
@@ -1102,7 +1213,7 @@ try {
         $checkCertificateExpiry,
         $debugMode,
         $challengeTimeout,
-        $storageManager 
+        $storageManager
     );
     
     $expiryMonitor = new CertificateExpiryMonitor(
@@ -1118,7 +1229,7 @@ try {
             throw new RateLimitException("Too many challenge requests. Please slow down.");
         }
         
-        log_message("Challenge requested from IP: " . $clientIP, $debugMode);
+        log_message("Challenge requested from IP: " . $clientIP . " (ID: " . $clientIdentifier . ")", $debugMode);
         
         $encodedChallenge = $authenticator->generateChallenge();
         
@@ -1131,7 +1242,7 @@ try {
         ], JSON_PRETTY_PRINT);
         
     } elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        log_message("Authentication attempt from IP: " . $clientIP, $debugMode);
+        log_message("Authentication attempt from IP: " . $clientIP . " (ID: " . $clientIdentifier . ")", $debugMode);
         
         $input = SecurityValidator::validateJsonInput($maxJsonInputSize);
         
@@ -1155,7 +1266,7 @@ try {
             $expiryMonitor->checkAndAlert($clientCertificate, $requiredClientCN);
         }
         
-        log_message("Authentication SUCCESS for IP: " . $clientIP, $debugMode);
+        log_message("Authentication SUCCESS for IP: " . $clientIP . " (ID: " . $clientIdentifier . ")", $debugMode);
         
         ob_clean();
         echo json_encode([
@@ -1181,22 +1292,42 @@ try {
     ob_clean();
     http_response_code(429);
     $errorMessage = $debugMode ? $e->getMessage() : "Rate limit exceeded";
-    echo json_encode(['status' => 'error', 'message' => $errorMessage], JSON_PRETTY_PRINT);
+    $response = ['status' => 'error', 'message' => $errorMessage];
+    
+    if (isset($rateLimiter) && isset($clientIdentifier)) {
+        $response['remaining_attempts'] = $rateLimiter->getRemainingRequests($clientIdentifier, true);
+    }
+    
+    echo json_encode($response, JSON_PRETTY_PRINT);
 } catch (AuthenticationException $e) {
     ob_clean();
     http_response_code(401);
     $errorMessage = $debugMode ? $e->getMessage() : "Authentication failed";
-    echo json_encode(['status' => 'error', 'message' => $errorMessage], JSON_PRETTY_PRINT);
+    $response = ['status' => 'error', 'message' => $errorMessage];
+    
+    if (isset($rateLimiter) && isset($clientIdentifier)) {
+        $response['remaining_attempts'] = $rateLimiter->getRemainingRequests($clientIdentifier, true);
+    }
+    
+    echo json_encode($response, JSON_PRETTY_PRINT);
 } catch (ValidationException $e) {
     ob_clean();
     http_response_code(400);
     $errorMessage = $debugMode ? $e->getMessage() : "Invalid request";
-    echo json_encode(['status' => 'error', 'message' => $errorMessage], JSON_PRETTY_PRINT);
+    $response = ['status' => 'error', 'message' => $errorMessage];
+    echo json_encode($response, JSON_PRETTY_PRINT);
+} catch (ConfigurationException $e) {
+    ob_clean();
+    http_response_code(500);
+    $errorMessage = $debugMode ? $e->getMessage() : "Server configuration error";
+    $response = ['status' => 'error', 'message' => $errorMessage];
+    echo json_encode($response, JSON_PRETTY_PRINT);
 } catch (Exception $e) {
     ob_clean();
     http_response_code(500);
     $errorMessage = $debugMode ? $e->getMessage() : "Internal server error";
-    echo json_encode(['status' => 'error', 'message' => $errorMessage], JSON_PRETTY_PRINT);
+    $response = ['status' => 'error', 'message' => $errorMessage];
+    echo json_encode($response, JSON_PRETTY_PRINT);
 }
 
 exit;

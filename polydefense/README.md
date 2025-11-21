@@ -226,6 +226,7 @@ php fingerprint.php client.crt
    │   ├── server.key
    │   ├── server.crt
    │   └── client.pub
+   ├── locks/ (auto-created)
    └── rate_limits/ (auto-created)
    ```
 
