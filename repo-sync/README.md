@@ -8,6 +8,8 @@
 
 This script was specifically developed to solve a critical problem: **synchronizing repositories when the source repository contains corrupted files that prevent normal Git operations.**
 
+You can see this script in action at [https://github.com/Krigsgaldrnet/TrinityCore-Master](https://github.com/Krigsgaldrnet/TrinityCore-Master) (unreleased test version of the script which in addition rewrites the references in commit messages to link to the original pull requests in the source repository).
+
 ### The Specific Scenario
 
 1. **Source Repository Corruption**: The original source repository contained malformed or corrupted files
@@ -104,9 +106,15 @@ REPOSITORIES=(
 
 ```bash
 ./repo-sync.sh
+
+If you are confident enough and want to run this script from CRON, turn off the debug mode.
+
+DEBUG_MODE=false
 ```
 
-The script processes all configured repositories sequentially with no additional arguments needed.
+
+
+The script processes all configured repositories sequentially with no additional arguments needed. In non debug mode the script will suppress all messages and exit if it encounters any error and logs to cron log. Mostly this happens when it encounters cherry-pick conflicts.
 
 
 

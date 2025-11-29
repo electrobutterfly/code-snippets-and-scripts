@@ -15,13 +15,15 @@
 # CONFIGURATION - Edit these arrays to match your repositories
 ###############################################################################
 
+# Debug mode - set to false for silent operation (e.g., in cron)
+DEBUG_MODE=true
+
 # Define your repositories here
 # Format: "local_folder|source_repo|source_branch|destination_repo|destination_branch"
 
 REPOSITORIES=(
     "my-project|https://github.com/original/project.git|main|https://github.com/yourusername/project-fork.git|main"
     "project-legacy|https://github.com/original/project.git|legacy|https://github.com/yourusername/project-legacy.git|develop"
-
 )
 
 ###############################################################################
@@ -38,12 +40,12 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 print_header() {
-    echo -e "${PURPLE}"
-    echo "╔════════════════════════════════════════════════════════════════╗"
-    echo "║                   Repository Synchronization                   ║"
-    echo "║                    Automated Cherry-Picking                    ║"
-    echo "╚════════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${PURPLE}"
+    [ "$DEBUG_MODE" = true ] && echo "╔════════════════════════════════════════════════════════════════╗"
+    [ "$DEBUG_MODE" = true ] && echo "║                   Repository Synchronization                   ║"
+    [ "$DEBUG_MODE" = true ] && echo "║                    Automated Cherry-Picking                    ║"
+    [ "$DEBUG_MODE" = true ] && echo "╚════════════════════════════════════════════════════════════════╝"
+    [ "$DEBUG_MODE" = true ] && echo -e "${NC}"
 }
 
 print_repo_info() {
@@ -55,28 +57,29 @@ print_repo_info() {
     local dest_repo=$6
     local dest_branch=$7
     
-    echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║ Repository ${YELLOW}$((idx+1))${CYAN} of ${YELLOW}$total${CYAN}: ${GREEN}$folder${NC}"
-    echo -e "${CYAN}║ Source:      ${BLUE}$src_repo${NC} (${YELLOW}$src_branch${NC})"
-    echo -e "${CYAN}║ Destination: ${BLUE}$dest_repo${NC} (${YELLOW}$dest_branch${NC})"
-    echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}║ Repository ${YELLOW}$((idx+1))${CYAN} of ${YELLOW}$total${CYAN}: ${GREEN}$folder${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}║ Source:      ${BLUE}$src_repo${NC} (${YELLOW}$src_branch${NC})"
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}║ Destination: ${BLUE}$dest_repo${NC} (${YELLOW}$dest_branch${NC})"
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
+    [ "$DEBUG_MODE" = true ] && echo ""
 }
 
 print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${GREEN}✅ $1${NC}"
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠️  $1${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${YELLOW}⚠️  $1${NC}"
 }
 
 print_error() {
-    echo -e "${RED}❌ $1${NC}"
+    # Always print errors, even in non-debug mode
+    echo -e "${RED}❌ $1${NC}" >&2
 }
 
 print_info() {
-    echo -e "${BLUE}ℹ️  $1${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${BLUE}ℹ️  $1${NC}"
 }
 
 # Use jq for reliable JSON parsing
@@ -135,18 +138,18 @@ process_repository() {
     
     cd "$local_folder"
     
-    echo ""
-    print_info "=== Processing: $local_folder ==="
+    [ "$DEBUG_MODE" = true ] && echo ""
+    [ "$DEBUG_MODE" = true ] && print_info "=== Processing: $local_folder ==="
     
     # Extract repo names for API
     local source_repo_name=$(echo "$source_repo" | sed 's|https://github.com/||' | sed 's|.git$||')
     local dest_repo_name=$(echo "$dest_repo" | sed 's|https://github.com/||' | sed 's|.git$||')
     
-    print_info "Source: $source_repo_name ($source_branch)"
-    print_info "Destination: $dest_repo_name ($dest_branch)"
+    [ "$DEBUG_MODE" = true ] && print_info "Source: $source_repo_name ($source_branch)"
+    [ "$DEBUG_MODE" = true ] && print_info "Destination: $dest_repo_name ($dest_branch)"
     
     # Get unique commits using jq
-    print_info "Finding unique commits..."
+    [ "$DEBUG_MODE" = true ] && print_info "Finding unique commits..."
     local unique_commits=()
     while IFS= read -r line; do
         [ -n "$line" ] && unique_commits+=("$line")
@@ -161,62 +164,80 @@ process_repository() {
     fi
     
     # Show what we found
-    echo ""
-    print_info "Found $unique_count new commits:"
-    for commit in "${unique_commits[@]}"; do
-        echo -e "  ${GREEN}•${NC} $commit"
-    done
+    [ "$DEBUG_MODE" = true ] && echo ""
+    [ "$DEBUG_MODE" = true ] && print_info "Found $unique_count new commits:"
+    if [ "$DEBUG_MODE" = true ]; then
+        for commit in "${unique_commits[@]}"; do
+            echo -e "  ${GREEN}•${NC} $commit"
+        done
+    fi
     
-    # Ask for confirmation
-    echo ""
-    read -p "$(echo -e ${YELLOW}"Proceed with cherry-picking? (y/N): "${NC})" -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        print_warning "Operation cancelled"
-        cd "$current_dir"
-        return 0
+    # Ask for confirmation (auto-approve if not in debug mode)
+    if [ "$DEBUG_MODE" = true ]; then
+        echo ""
+        read -p "$(echo -e ${YELLOW}"Proceed with cherry-picking? (y/N): "${NC})" -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_warning "Operation cancelled"
+            cd "$current_dir"
+            return 0
+        fi
+    else
+        # Auto-approve in non-debug mode
+        print_info "Auto-approving cherry-pick for $unique_count commits (non-debug mode)"
     fi
     
     # Execute git operations
-    print_info "Executing git operations..."
+    [ "$DEBUG_MODE" = true ] && print_info "Executing git operations..."
     
     # Fetch from upstream with exact number needed + 1 for grafted
     local fetch_depth=$((unique_count + 1))
-    print_info "Fetching from upstream (depth=$fetch_depth)..."
+    [ "$DEBUG_MODE" = true ] && print_info "Fetching from upstream (depth=$fetch_depth)..."
     git fetch upstream $source_branch --depth=$fetch_depth
     
     # Create temporary branch
-    print_info "Creating temporary branch..."
+    [ "$DEBUG_MODE" = true ] && print_info "Creating temporary branch..."
     git branch -D temp-upstream 2>/dev/null || true
     git checkout -b temp-upstream upstream/$source_branch
     
-    # Show what we'll cherry-pick
-    print_info "Commits in temp-upstream:"
-    git log --oneline -$fetch_depth
+    # Show what we'll cherry-pick (only in debug mode)
+    if [ "$DEBUG_MODE" = true ]; then
+        print_info "Commits in temp-upstream:"
+        git log --oneline -$fetch_depth
+    fi
     
     # Switch back to destination branch
-    print_info "Switching back to $dest_branch branch..."
+    [ "$DEBUG_MODE" = true ] && print_info "Switching back to $dest_branch branch..."
     git checkout $dest_branch
     
     # Get commit hashes in correct order - Take the NEWEST commits
     local commit_hashes=($(git log temp-upstream --oneline -$fetch_depth | head -n $unique_count | cut -d' ' -f1))
     
-    print_info "Cherry-picking $unique_count commits..."
+    [ "$DEBUG_MODE" = true ] && print_info "Cherry-picking $unique_count commits..."
     for ((i=${#commit_hashes[@]}-1; i>=0; i--)); do
         local hash="${commit_hashes[$i]}"
         local commit_msg=$(git log -1 --format="%s" "$hash")
-        print_info "Cherry-picking: ${hash:0:8} - $commit_msg"
+        [ "$DEBUG_MODE" = true ] && print_info "Cherry-picking: ${hash:0:8} - $commit_msg"
         if ! git cherry-pick "$hash"; then
-            print_error "Cherry-pick failed!"
-            print_warning "Resolve conflicts and run: git cherry-pick --continue"
-            print_warning "Or abort with: git cherry-pick --abort"
-            cd "$current_dir"
-            return 1
+            print_error "Cherry-pick failed for commit ${hash:0:8} - $commit_msg"
+            if [ "$DEBUG_MODE" = false ]; then
+                print_error "Conflict detected in non-debug mode. Exiting."
+                # Clean up before exiting
+                git cherry-pick --abort 2>/dev/null || true
+                git branch -D temp-upstream 2>/dev/null || true
+                cd "$current_dir"
+                exit 1
+            else
+                print_warning "Resolve conflicts and run: git cherry-pick --continue"
+                print_warning "Or abort with: git cherry-pick --abort"
+                cd "$current_dir"
+                return 1
+            fi
         fi
     done
     
     # Push changes
-    print_info "Pushing to origin..."
+    [ "$DEBUG_MODE" = true ] && print_info "Pushing to origin..."
     git push --force origin
     
     # Clean up
@@ -239,8 +260,8 @@ if [ ${#REPOSITORIES[@]} -eq 0 ]; then
     exit 1
 fi
 
-print_info "Found ${#REPOSITORIES[@]} repository configuration(s)"
-echo ""
+[ "$DEBUG_MODE" = true ] && print_info "Found ${#REPOSITORIES[@]} repository configuration(s)"
+[ "$DEBUG_MODE" = true ] && echo ""
 
 # Process each repository
 for i in "${!REPOSITORIES[@]}"; do
@@ -250,12 +271,12 @@ for i in "${!REPOSITORIES[@]}"; do
     
     process_repository "$local_folder" "$source_repo" "$source_branch" "$dest_repo" "$dest_branch"
     
-    echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║                    Repository Complete                         ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    [ "$DEBUG_MODE" = true ] && echo ""
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}║                    Repository Complete                         ║${NC}"
+    [ "$DEBUG_MODE" = true ] && echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
+    [ "$DEBUG_MODE" = true ] && echo ""
 done
 
 print_success "All repositories processed!"
-echo ""
+[ "$DEBUG_MODE" = true ] && echo ""
